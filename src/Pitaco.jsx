@@ -280,6 +280,223 @@ function mesmaObra(a, b) {
   );
 }
 
+// ============== COMPARTILHAR LISTA COMO PNG ==================
+// Desenha a watchlist inteira num canvas com a identidade do Pitaco
+// (fundo escuro, marca, nome gigante, grade de pôsteres) e devolve um
+// Blob PNG pronto para o compartilhamento nativo ou download.
+
+function quebrarTexto(ctx, texto, larguraMax) {
+  const palavras = String(texto).split(/\s+/).filter(Boolean);
+  const linhas = [];
+  let atual = "";
+  for (const p of palavras) {
+    const teste = atual ? atual + " " + p : p;
+    if (ctx.measureText(teste).width <= larguraMax || !atual) atual = teste;
+    else { linhas.push(atual); atual = p; }
+  }
+  if (atual) linhas.push(atual);
+  return linhas.length ? linhas : [""];
+}
+
+function caminhoArredondado(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+// Desenha a imagem preenchendo a área (corte central, tipo object-fit: cover)
+function desenharCapa(ctx, img, x, y, w, h, r) {
+  ctx.save();
+  caminhoArredondado(ctx, x, y, w, h, r);
+  ctx.clip();
+  const razaoImg = img.width / img.height;
+  const razaoAlvo = w / h;
+  let sw = img.width, sh = img.height, sx = 0, sy = 0;
+  if (razaoImg > razaoAlvo) {
+    sw = img.height * razaoAlvo;
+    sx = (img.width - sw) / 2;
+  } else {
+    sh = img.width / razaoAlvo;
+    sy = (img.height - sh) / 2;
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+  ctx.restore();
+}
+
+// Carrega um pôster com CORS liberado (o CDN do TMDB permite), para o
+// canvas não ficar "contaminado" e o PNG poder ser exportado.
+function carregarImagem(url) {
+  return new Promise((res) => {
+    if (!url) return res(null);
+    const im = new Image();
+    im.crossOrigin = "anonymous";
+    const t = setTimeout(() => res(null), 7000);
+    im.onload = () => { clearTimeout(t); res(im); };
+    im.onerror = () => { clearTimeout(t); res(null); };
+    im.src = url;
+  });
+}
+
+async function gerarImagemLista(lista, urls) {
+  // Garante que as fontes da identidade estejam prontas para o canvas
+  try {
+    await Promise.all([
+      document.fonts.load("80px 'Archivo Black'"),
+      document.fonts.load("700 26px 'Archivo'"),
+      document.fonts.load("20px 'Space Mono'"),
+    ]);
+    await document.fonts.ready;
+  } catch (e) {}
+
+  const itens = lista.itens;
+  const imgs = await Promise.all(urls.map((u) => carregarImagem(u)));
+
+  const W = 1080;
+  const M = 72;                 // margem lateral
+  const COLS = 3;
+  const GAP = 28;
+  const CW = Math.floor((W - M * 2 - GAP * (COLS - 1)) / COLS);
+  const PH = Math.round(CW * 1.5);   // altura do pôster (2:3)
+  const CAPH = 100;                  // legenda abaixo do pôster
+
+  // Mede o nome da lista para saber a altura total
+  const med = document.createElement("canvas").getContext("2d");
+  med.font = "80px 'Archivo Black', sans-serif";
+  const nomeLinhas = quebrarTexto(med, (lista.nome || "").toUpperCase(), W - M * 2).slice(0, 3);
+
+  const topoH = 176;
+  const nomeH = nomeLinhas.length * 84 + 30;
+  const linhas = Math.ceil(itens.length / COLS);
+  const gridH = linhas * (PH + CAPH) + Math.max(0, linhas - 1) * GAP;
+  const rodH = 130;
+  const H = topoH + nomeH + gridH + rodH;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  // Fundo escuro com respingos de luz âmbar/vermelha (as "luzes líquidas")
+  ctx.fillStyle = "#0d0b09";
+  ctx.fillRect(0, 0, W, H);
+  let g = ctx.createRadialGradient(W * 0.2, 0, 0, W * 0.2, 0, H * 0.7);
+  g.addColorStop(0, "rgba(240,146,30,0.15)");
+  g.addColorStop(1, "rgba(240,146,30,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  g = ctx.createRadialGradient(W, H, 0, W, H, H * 0.8);
+  g.addColorStop(0, "rgba(230,57,43,0.10)");
+  g.addColorStop(1, "rgba(230,57,43,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Marca no topo
+  ctx.fillStyle = "#e6392b";
+  ctx.beginPath();
+  ctx.arc(M + 8, 88, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#f6f3ec";
+  ctx.font = "34px 'Archivo Black', sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillText("P I T A C O", M + 32, 90);
+  ctx.font = "19px 'Space Mono', monospace";
+  ctx.fillStyle = "rgba(246,243,236,0.5)";
+  ctx.textAlign = "right";
+  ctx.fillText("ARQUIVO PESSOAL DE CINEMA", W - M, 90);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+
+  // Rótulo da watchlist
+  ctx.font = "21px 'Space Mono', monospace";
+  ctx.fillStyle = "#e6392b";
+  const plural = itens.length === 1 ? "TÍTULO" : "TÍTULOS";
+  ctx.fillText("/// WATCHLIST \u00b7 " + itens.length + " " + plural, M, 156);
+
+  // Nome da lista, gigante
+  ctx.fillStyle = "#f6f3ec";
+  ctx.font = "80px 'Archivo Black', sans-serif";
+  nomeLinhas.forEach((ln, i) => ctx.fillText(ln, M, topoH + 60 + i * 84));
+
+  // Grade de pôsteres (caixas de luz)
+  const gy0 = topoH + nomeH;
+  itens.forEach((item, i) => {
+    const col = i % COLS;
+    const lin = Math.floor(i / COLS);
+    const x = M + col * (CW + GAP);
+    const y = gy0 + lin * (PH + CAPH + GAP);
+
+    // moldura
+    ctx.fillStyle = "#181310";
+    caminhoArredondado(ctx, x, y, CW, PH, 14);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.12)";
+    ctx.lineWidth = 2;
+    caminhoArredondado(ctx, x, y, CW, PH, 14);
+    ctx.stroke();
+
+    const im = imgs[i];
+    if (im) {
+      desenharCapa(ctx, im, x + 8, y + 8, CW - 16, PH - 16, 8);
+    } else {
+      // sem pôster: inicial do título, como no site
+      ctx.fillStyle = "rgba(255,217,163,0.6)";
+      ctx.font = "110px 'Archivo Black', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText((item.titulo || "?").trim().charAt(0).toUpperCase(), x + CW / 2, y + PH / 2);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+    }
+
+    // brilho de topo da caixa de luz
+    const gs = ctx.createLinearGradient(0, y, 0, y + PH * 0.34);
+    gs.addColorStop(0, "rgba(255,235,200,0.14)");
+    gs.addColorStop(1, "rgba(255,235,200,0)");
+    ctx.fillStyle = gs;
+    caminhoArredondado(ctx, x, y, CW, PH, 14);
+    ctx.fill();
+
+    // legenda: título (até 2 linhas) + ano/tipo
+    ctx.font = "700 26px 'Archivo', sans-serif";
+    ctx.fillStyle = "#f6f3ec";
+    const todas = quebrarTexto(ctx, item.titulo || "", CW);
+    const tLinhas = todas.slice(0, 2);
+    if (todas.length > 2) tLinhas[1] = tLinhas[1] + "\u2026";
+    tLinhas.forEach((ln, k) => ctx.fillText(ln, x, y + PH + 38 + k * 31));
+    ctx.font = "17px 'Space Mono', monospace";
+    ctx.fillStyle = "rgba(246,243,236,0.55)";
+    const meta = [item.ano, (item.tipo || "").toUpperCase()].filter(Boolean).join(" \u00b7 ");
+    if (meta) ctx.fillText(meta, x, y + PH + 38 + tLinhas.length * 31 + 6);
+  });
+
+  // Rodapé
+  const ry = H - 76;
+  ctx.strokeStyle = "rgba(246,243,236,0.15)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(M, ry);
+  ctx.lineTo(W - M, ry);
+  ctx.stroke();
+  ctx.font = "18px 'Space Mono', monospace";
+  ctx.fillStyle = "#e6392b";
+  ctx.fillText("FEITO NO PITACO", M, ry + 44);
+  ctx.fillStyle = "rgba(246,243,236,0.5)";
+  ctx.textAlign = "right";
+  let host = "";
+  try { host = (window.location.host || "").toUpperCase(); } catch (e) {}
+  ctx.fillText(host || "ARQUIVO PESSOAL DE CINEMA", W - M, ry + 44);
+  ctx.textAlign = "left";
+
+  return await new Promise((res, rej) =>
+    canvas.toBlob((b) => (b ? res(b) : rej(new Error("Falha ao gerar o PNG"))), "image/png")
+  );
+}
+
 // ==================== COMPONENTES DE APOIO ======================
 
 // Pôster (imagem ou letreiro com a inicial quando não há imagem)
@@ -421,6 +638,8 @@ export default function Pitaco() {
   const [listasProntas, setListasProntas] = useState(false);
   const [nomeNovaLista, setNomeNovaLista] = useState("");
   const [confirmaApagar, setConfirmaApagar] = useState(null);
+  const [compartilhando, setCompartilhando] = useState(null);      // id da lista gerando PNG
+  const [avisoCompartilhar, setAvisoCompartilhar] = useState(null); // { id, msg }
 
   // --- Popover "salvar em" ---
   const [menuSalvar, setMenuSalvar] = useState(null);
@@ -804,6 +1023,74 @@ Regras:
   function apagarLista(listaId) {
     setListas((prev) => prev.filter((l) => l.id !== listaId));
     setConfirmaApagar(null);
+  }
+
+  function mostrarAvisoLista(id, msg) {
+    setAvisoCompartilhar({ id, msg });
+    setTimeout(
+      () => setAvisoCompartilhar((a) => (a && a.id === id ? null : a)),
+      2600
+    );
+  }
+
+  // Gera o PNG da watchlist e abre a folha de compartilhamento nativa
+  // (celular). Onde não dá para compartilhar arquivo, baixa o PNG.
+  async function compartilharLista(lista) {
+    if (compartilhando || !lista.itens.length) return;
+    setCompartilhando(lista.id);
+    try {
+      // Garante o pôster de cada item (usa o cache; busca só o que faltar)
+      const urls = await Promise.all(
+        lista.itens.map(async (item) => {
+          const c = chaveObra(item);
+          if (posters[c] !== undefined) return posters[c];
+          return await buscarPosterTMDB(item);
+        })
+      );
+
+      const blob = await gerarImagemLista(lista, urls);
+      const nomeArq =
+        "pitaco-" +
+        (lista.nome || "lista")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "") +
+        ".png";
+      const arquivo = new File([blob], nomeArq, { type: "image/png" });
+
+      if (
+        typeof navigator !== "undefined" &&
+        navigator.canShare &&
+        navigator.canShare({ files: [arquivo] })
+      ) {
+        await navigator.share({
+          files: [arquivo],
+          title: "Watchlist no Pitaco",
+          text: 'Minha lista "' + lista.nome + '" no Pitaco \uD83C\uDFAC',
+        });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = nomeArq;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        mostrarAvisoLista(lista.id, "png baixado \u2713");
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        // pessoa fechou a folha de compartilhamento — tudo bem
+      } else {
+        console.error(e);
+        mostrarAvisoLista(lista.id, "n\u00e3o deu \u2014 tente de novo");
+      }
+    } finally {
+      setCompartilhando(null);
+    }
   }
 
   function obraSalva(obra) {
@@ -1363,22 +1650,37 @@ Regras:
                   <span className="prat-qtd">
                     {l.itens.length} {l.itens.length === 1 ? "título" : "títulos"}
                   </span>
-                  <button
-                    className="prat-apagar"
-                    onClick={() => {
-                      if (confirmaApagar === l.id) {
-                        apagarLista(l.id);
-                      } else {
-                        setConfirmaApagar(l.id);
-                        setTimeout(
-                          () => setConfirmaApagar((c) => (c === l.id ? null : c)),
-                          3000
-                        );
-                      }
-                    }}
-                  >
-                    {confirmaApagar === l.id ? "apagar mesmo?" : "apagar"}
-                  </button>
+                  <div className="prat-acoes">
+                    {l.itens.length > 0 && (
+                      <button
+                        className="prat-compartilhar"
+                        onClick={() => compartilharLista(l)}
+                        disabled={compartilhando !== null}
+                      >
+                        {compartilhando === l.id
+                          ? "gerando png…"
+                          : avisoCompartilhar && avisoCompartilhar.id === l.id
+                          ? avisoCompartilhar.msg
+                          : "compartilhar"}
+                      </button>
+                    )}
+                    <button
+                      className="prat-apagar"
+                      onClick={() => {
+                        if (confirmaApagar === l.id) {
+                          apagarLista(l.id);
+                        } else {
+                          setConfirmaApagar(l.id);
+                          setTimeout(
+                            () => setConfirmaApagar((c) => (c === l.id ? null : c)),
+                            3000
+                          );
+                        }
+                      }}
+                    >
+                      {confirmaApagar === l.id ? "apagar mesmo?" : "apagar"}
+                    </button>
+                  </div>
                 </header>
 
                 {l.itens.length === 0 ? (
@@ -2450,8 +2752,26 @@ tbody:first-of-type .linha td { border-top: none; }
   font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
   color: rgba(246,243,236,0.5);
 }
-.prat-apagar {
+.prat-acoes {
   margin-left: auto;
+  display: flex; gap: 8px; flex-wrap: wrap;
+  align-items: center;
+}
+.prat-compartilhar {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 7px 12px; border-radius: 999px;
+  background: transparent;
+  border: 1px solid rgba(240,146,30,0.55);
+  color: var(--ambar); cursor: pointer;
+  transition: all 0.2s ease;
+}
+.prat-compartilhar:hover:not(:disabled) {
+  background: rgba(240,146,30,0.16);
+  color: var(--luz);
+}
+.prat-compartilhar:disabled { opacity: 0.6; cursor: wait; }
+.prat-apagar {
   font-family: 'Space Mono', monospace;
   font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
   padding: 7px 12px; border-radius: 999px;
