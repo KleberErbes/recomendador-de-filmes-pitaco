@@ -1,0 +1,16 @@
+/* Reset mínimo. Todo o visual do Pitaco vive dentro do próprio componente
+   (Pitaco.jsx), então aqui só zeramos margens e garantimos o fundo escuro. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0d0b09;
+}
+
+#root {
+  min-height: 100vh;
+}
