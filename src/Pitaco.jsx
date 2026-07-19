@@ -33,6 +33,11 @@ import { useState, useEffect, useRef, useMemo } from "react";
 // lugar dos pôsteres.
 const TMDB_ATIVO = true;
 
+// Parede de pôsteres do herói: quantas colunas e quantos pôsteres no total.
+// (No celular, as duas colunas das pontas são escondidas para não espremer.)
+const COLUNAS_PAREDE = 6;
+const ITENS_PAREDE = 24;
+
 const EXEMPLOS = [
   "Suspense psicológico que embola a cabeça",
   "Comédia leve pra ver com a família no domingo",
@@ -172,11 +177,18 @@ async function buscarPosterTMDB(obra) {
 async function buscarTendencias() {
   if (!TMDB_ATIVO) return [];
   try {
-    const resp = await fetch("/api/tmdb?rota=trending/all/week&language=pt-BR");
-    const dados = await resp.json();
-    return (dados.results || [])
+    // Duas páginas de tendências para encher a parede inteira
+    const paginas = await Promise.all(
+      [1, 2].map((p) =>
+        fetch("/api/tmdb?rota=trending/all/week&language=pt-BR&page=" + p)
+          .then((r) => r.json())
+          .catch(() => ({ results: [] }))
+      )
+    );
+    const juntos = paginas.flatMap((d) => d.results || []);
+    return juntos
       .filter((r) => r.poster_path && (r.media_type === "movie" || r.media_type === "tv"))
-      .slice(0, 16)
+      .slice(0, ITENS_PAREDE)
       .map((r) => ({
         titulo: r.title || r.name,
         ano: parseInt((r.release_date || r.first_air_date || "").slice(0, 4), 10) || null,
@@ -423,12 +435,12 @@ export default function Pitaco() {
     []
   );
 
-  // Parede do herói: 16 posições (tendências ou caixas decorativas)
+  // Parede do herói: preenche os espaços (tendências ou caixas decorativas)
   const colunas = useMemo(() => {
-    const base = tendencias.slice(0, 16);
-    while (base.length < 16) base.push(null);
-    const cols = [[], [], [], []];
-    base.forEach((obra, idx) => cols[idx % 4].push({ obra, idx }));
+    const base = tendencias.slice(0, ITENS_PAREDE);
+    while (base.length < ITENS_PAREDE) base.push(null);
+    const cols = Array.from({ length: COLUNAS_PAREDE }, () => []);
+    base.forEach((obra, idx) => cols[idx % COLUNAS_PAREDE].push({ obra, idx }));
     return cols;
   }, [tendencias]);
 
@@ -522,15 +534,19 @@ export default function Pitaco() {
     return () => document.removeEventListener("click", fechar);
   }, [menuSalvar]);
 
-  // Revelação ao rolar (elementos com data-revelar)
+  // Revelação ao rolar (elementos com data-revelar).
+  // Usamos um ATRIBUTO (data-visivel) em vez de classe: o React reescreve o
+  // className de elementos com classe dinâmica (ex.: as linhas da tabela ao
+  // abrir/fechar), o que apagava a classe adicionada por fora e fazia as
+  // linhas sumirem. Atributos de dados o React não toca.
   useEffect(() => {
-    const els = document.querySelectorAll("[data-revelar]:not(.visivel)");
+    const els = document.querySelectorAll("[data-revelar]:not([data-visivel])");
     if (!els.length) return;
     const obs = new IntersectionObserver(
       (entradas) => {
         entradas.forEach((en) => {
           if (en.isIntersecting) {
-            en.target.classList.add("visivel");
+            en.target.setAttribute("data-visivel", "1");
             obs.unobserve(en.target);
           }
         });
@@ -884,7 +900,7 @@ Regras:
                     <button
                       key={idx}
                       className="caixa acesa"
-                      style={{ animationDelay: 0.2 + idx * 0.09 + "s" }}
+                      style={{ animationDelay: 0.2 + idx * 0.06 + "s" }}
                       onClick={() => usarTendencia(obra)}
                       title={"pedir algo no clima de " + obra.titulo}
                       tabIndex={-1}
@@ -895,7 +911,7 @@ Regras:
                     <div
                       key={idx}
                       className="caixa acesa caixa-vazia"
-                      style={{ animationDelay: 0.2 + idx * 0.09 + "s" }}
+                      style={{ animationDelay: 0.2 + idx * 0.06 + "s" }}
                     >
                       <span className="cv-num">{String(idx + 1).padStart(3, "0")}</span>
                       <span className="cv-rot">arquivo</span>
@@ -1532,22 +1548,22 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   position: fixed; top: 14px; left: 50%;
   transform: translateX(-50%);
   z-index: 90;
-  width: min(580px, calc(100% - 24px));
+  width: min(640px, calc(100% - 24px));
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px;
-  padding: 6px 6px 6px 16px;
+  padding: 10px 10px 10px 20px;
   border-radius: 999px;
 }
 .nav-marca {
   font-family: 'Archivo Black', sans-serif;
-  font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+  font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--branco);
   background: none; border: none; cursor: pointer;
-  display: inline-flex; align-items: center; gap: 8px;
+  display: inline-flex; align-items: center; gap: 9px;
   padding: 6px 0;
 }
 .nav-marca i {
-  width: 7px; height: 7px; border-radius: 50%;
+  width: 8px; height: 8px; border-radius: 50%;
   background: var(--vermelho);
   box-shadow: 0 0 10px var(--vermelho);
   animation: pulsoLuz 2.2s ease-in-out infinite;
@@ -1557,7 +1573,7 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   display: grid; grid-template-columns: repeat(3, 1fr);
 }
 .nav-indicador {
-  position: absolute; top: 3px; bottom: 3px; left: 0;
+  position: absolute; top: 4px; bottom: 4px; left: 0;
   width: calc(100% / 3);
   background: rgba(255,255,255,0.14);
   border: 1px solid rgba(255,255,255,0.2);
@@ -1568,9 +1584,9 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 .nav-item {
   position: relative; z-index: 1;
   font-family: 'Space Mono', monospace;
-  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase;
   color: rgba(246,243,236,0.6);
-  padding: 9px 14px;
+  padding: 13px 18px;
   background: none; border: none; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   white-space: nowrap;
@@ -1601,18 +1617,20 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   mask-image: linear-gradient(180deg, #000 55%, transparent 97%);
 }
 .parede {
-  display: flex; justify-content: center; gap: 20px;
+  display: flex; justify-content: center; gap: 16px;
   padding: 44px 20px 0;
   transform-style: preserve-3d;
 }
 .coluna {
-  flex: 1; max-width: 185px;
-  display: flex; flex-direction: column; gap: 20px;
+  flex: 1; max-width: 150px;
+  display: flex; flex-direction: column; gap: 16px;
 }
-.col-0 { transform: rotateY(18deg) translateZ(-46px); }
-.col-1 { transform: rotateY(6deg); }
-.col-2 { transform: rotateY(-6deg); }
-.col-3 { transform: rotateY(-18deg) translateZ(-46px); }
+.col-0 { transform: rotateY(24deg) translateZ(-72px); }
+.col-1 { transform: rotateY(14deg) translateZ(-28px); }
+.col-2 { transform: rotateY(5deg); }
+.col-3 { transform: rotateY(-5deg); }
+.col-4 { transform: rotateY(-14deg) translateZ(-28px); }
+.col-5 { transform: rotateY(-24deg) translateZ(-72px); }
 .heroi-veu {
   position: absolute; inset: 0; z-index: 1;
   background: linear-gradient(180deg,
@@ -2533,14 +2551,17 @@ tbody:first-of-type .linha td { border-top: none; }
   opacity: 0; transform: translateY(28px);
   transition: opacity 0.8s ease, transform 0.8s cubic-bezier(0.2, 0.75, 0.2, 1);
 }
-[data-revelar].visivel { opacity: 1; transform: translateY(0); }
+[data-revelar][data-visivel] { opacity: 1; transform: translateY(0); }
 
 /* ======================== RESPONSIVO ========================= */
 @media (max-width: 760px) {
-  .nav-marca { font-size: 11px; }
-  .nav-item { font-size: 10px; padding: 8px 8px; }
+  .nav-marca { font-size: 12px; }
+  .nav-item { font-size: 11px; padding: 11px 10px; }
   .parede { gap: 10px; padding: 34px 12px 0; }
-  .coluna { gap: 10px; max-width: 108px; }
+  .coluna { gap: 10px; max-width: 104px; }
+  .col-0, .col-5 { display: none; }
+  .col-1 { transform: rotateY(18deg) translateZ(-40px); }
+  .col-4 { transform: rotateY(-18deg) translateZ(-40px); }
   .secao-cabeca, .faixa-cabeca { grid-template-columns: 1fr; }
   .secao-desc, .faixa-desc { grid-column: 1; }
   .secao-num { justify-self: start; margin-top: 0; }
