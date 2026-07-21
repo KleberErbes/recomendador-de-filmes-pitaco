@@ -1,51 +1,45 @@
-// api/poster.js
+// api/tmdb.js
 // -----------------------------------------------------------------------------
-// Serverless function (Vercel) que faz proxy dos pôsteres do TMDB pela NOSSA
-// origem. Motivo: para exportar um canvas que contém imagens (o PNG de
-// compartilhar listas), o navegador exige que as imagens venham da mesma origem
-// OU com CORS impecável. Imagens carregadas antes sem crossOrigin "contaminam"
-// o canvas e o toBlob falha — foi por isso que só aparecia a inicial no PNG.
+// Serverless function (Vercel) que repassa buscas para o TMDB. A chave
+// TMDB_API_KEY fica SÓ aqui no servidor, via variável de ambiente.
 //
-// Servindo o pôster por aqui (/api/poster?path=/xxxx.jpg), ele passa a ser
-// "mesma origem" e o canvas exporta sem erro.
+// O front chama, por exemplo:
+//   /api/tmdb?rota=search/multi&language=pt-BR&query=matrix
+//   /api/tmdb?rota=trending/all/week&language=pt-BR
 //
-// Segurança: só aceitamos caminhos de imagem do próprio TMDB (começam com "/" e
-// terminam em .jpg/.png), e um tamanho da lista branca. Nada de URL arbitrária.
+// Só liberamos rotas conhecidas (lista branca) por segurança, e cacheamos a
+// resposta na borda por algumas horas para economizar chamadas.
 // -----------------------------------------------------------------------------
 
-const TAMANHOS_PERMITIDOS = new Set(["w342", "w500", "w780", "original"]);
+const ROTAS_PERMITIDAS = new Set(["search/multi", "trending/all/week"]);
 
 export default async function handler(req, res) {
-  const { path, size } = req.query;
-  const tamanho = TAMANHOS_PERMITIDOS.has(size) ? size : "w500";
+  const chave = process.env.TMDB_API_KEY;
+  if (!chave) {
+    return res.status(500).json({ error: "TMDB_API_KEY não configurada no servidor." });
+  }
 
-  // Valida o caminho: precisa ser um path de imagem do TMDB, nada além disso.
-  if (
-    typeof path !== "string" ||
-    !path.startsWith("/") ||
-    !/^\/[A-Za-z0-9._-]+\.(jpg|jpeg|png|webp)$/i.test(path)
-  ) {
-    return res.status(400).json({ error: "Caminho de pôster inválido." });
+  const { rota, ...resto } = req.query;
+  if (!rota || !ROTAS_PERMITIDAS.has(rota)) {
+    return res.status(400).json({ error: "Rota não permitida." });
+  }
+
+  // Remonta os parâmetros extras (query, language, include_adult…) e injeta a chave.
+  const params = new URLSearchParams();
+  params.set("api_key", chave);
+  for (const [k, v] of Object.entries(resto)) {
+    if (v != null) params.set(k, Array.isArray(v) ? v[0] : v);
   }
 
   try {
-    const url = "https://image.tmdb.org/t/p/" + tamanho + path;
-    const upstream = await fetch(url);
+    const url = "https://api.themoviedb.org/3/" + rota + "?" + params.toString();
+    const resposta = await fetch(url);
+    const dados = await resposta.json();
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({ error: "Pôster não encontrado." });
-    }
-
-    const contentType = upstream.headers.get("content-type") || "image/jpeg";
-    const buffer = Buffer.from(await upstream.arrayBuffer());
-
-    // Cache forte na borda da Vercel: pôsteres não mudam.
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "public, s-maxage=604800, stale-while-revalidate=86400");
-    // Mesma origem, mas deixamos o CORS explícito por garantia.
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    return res.status(200).send(buffer);
+    // Cache na CDN da Vercel: 6h, revalidando em segundo plano por 1 dia.
+    res.setHeader("Cache-Control", "public, s-maxage=21600, stale-while-revalidate=86400");
+    return res.status(resposta.status).json(dados);
   } catch (e) {
-    return res.status(500).json({ error: "Falha ao buscar o pôster: " + e.message });
+    return res.status(500).json({ error: "Falha ao falar com o TMDB: " + e.message });
   }
 }
