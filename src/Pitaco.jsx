@@ -867,6 +867,7 @@ export default function Pitaco() {
     if (alvo) alvo.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   const idxSecao = { descobrir: 0, identificar: 1, listas: 2 }[secaoAtiva] ?? 0;
+  const totalSalvos = listas.reduce((soma, l) => soma + l.itens.length, 0);
 
   // Alinhamento do indicador da navbar: em vez de calcular 1/3 (que sofria
   // arredondamento e ficava "torto"), medimos a posição REAL do item ativo no
@@ -1173,8 +1174,6 @@ Regras:
   function obraSalva(obra) {
     return listas.some((l) => l.itens.some((i) => mesmaObra(i, obra)));
   }
-
-  const totalSalvos = listas.reduce((soma, l) => soma + l.itens.length, 0);
 
   function propsSalvar(chaveCard, obra) {
     return {
