@@ -1895,16 +1895,21 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 }
 .nav-links {
   position: relative;
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+/* Indicador desliza sobre o item ativo. Usa translateX de 100% da PRÓPRIA largura
+   (que é exatamente 1/3), então acompanha o grid sem "torto". A animação de
+   deslize dá o efeito suave ao trocar de aba. */
 .nav-indicador {
   position: absolute; top: 4px; bottom: 4px; left: 0;
   width: calc(100% / 3);
-  background: rgba(255,255,255,0.14);
-  border: 1px solid rgba(255,255,255,0.2);
+  background: var(--branco);
+  border: 1px solid rgba(255,255,255,0.9);
   border-radius: 999px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 2px 10px rgba(0,0,0,0.25);
   transition: transform 0.55s cubic-bezier(0.3, 1.5, 0.35, 1);
+  pointer-events: none;
+  will-change: transform;
 }
 .nav-item {
   position: relative; z-index: 1;
@@ -1917,8 +1922,12 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   white-space: nowrap;
   transition: color 0.2s ease;
 }
+/* Ao passar o mouse, o texto fica claro (contraste com o fundo escuro da barra). */
 .nav-item:hover { color: var(--branco); }
-.nav-item.ativo { color: var(--branco); }
+/* O item ativo está sob o indicador BRANCO, então o texto precisa ficar ESCURO
+   para manter contraste e legibilidade. Isso vence o :hover porque vem depois. */
+.nav-item.ativo { color: var(--preto); }
+.nav-item.ativo:hover { color: var(--preto); }
 .nav-item em {
   font-style: normal; font-size: 9px;
   background: var(--vermelho); color: #fff;
@@ -2859,7 +2868,7 @@ tbody:first-of-type .linha td { border-top: none; }
 .rodape {
   position: relative; z-index: 1;
   border-top: 1px solid rgba(255,255,255,0.12);
-  margin-top: 40px; padding-top: 34px;
+  margin-top: 28px; padding-top: 26px;
   overflow: hidden;
 }
 .rodape-linhas {
@@ -2874,12 +2883,12 @@ tbody:first-of-type .linha td { border-top: none; }
 }
 .rodape-marca {
   font-family: 'Archivo Black', sans-serif;
-  font-size: clamp(90px, 21vw, 300px);
+  font-size: clamp(72px, 16vw, 220px);
   line-height: 0.78; letter-spacing: -0.03em;
   text-transform: uppercase; text-align: center;
   color: transparent;
   -webkit-text-stroke: 2px rgba(246,243,236,0.2);
-  margin: 30px 0 -0.08em;
+  margin: 18px 0 -0.06em;
   user-select: none;
   transition: color 0.4s ease;
 }
@@ -2921,9 +2930,20 @@ tbody:first-of-type .linha td { border-top: none; }
   .secao-num { justify-self: start; margin-top: 0; }
   .col-ano, .col-tipo, .col-gen { display: none; }
   .td-titulo { font-size: 18px; }
-  .ficha-grade { grid-template-columns: 92px 1fr; padding: 6px 14px 26px; }
+  .ficha-grade { grid-template-columns: 92px 1fr; padding: 6px 14px 22px; gap: 14px; }
   .ficha-poster { width: 92px; }
-  .ficha.aberta { max-height: 560px; }
+  /* max-height justo ao conteúdo real no mobile (pôster + textos), sem sobrar o
+     vão grande em branco que aparecia antes ao abrir uma sugestão. */
+  .ficha.aberta { max-height: 420px; }
+  /* No mobile, o menu "salvar em lista" precisa transbordar por cima das próximas
+     sugestões. Elevamos ainda mais o empilhamento da linha aberta e do menu, e
+     encostamos o menu à esquerda para não vazar pela borda direita da tela. */
+  .linha-detalhe.aberta { z-index: 200; }
+  .menu-salvar {
+    right: auto; left: 0;
+    width: min(240px, calc(100vw - 40px));
+    z-index: 210;
+  }
   .papel-nota { text-align: left; }
   .achado-grade { grid-template-columns: 1fr; }
   .caixa.grande { width: min(260px, 82%); margin-inline: auto; }
