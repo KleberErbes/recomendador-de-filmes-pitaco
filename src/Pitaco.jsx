@@ -1402,7 +1402,7 @@ Regras:
                           {(r.generos || []).slice(0, 2).join(" · ") || "—"}
                         </td>
                       </tr>
-                      <tr className="linha-detalhe">
+                      <tr className={"linha-detalhe" + (linhaAberta === i ? " aberta" : "")}>
                         <td colSpan={5}>
                           <div className={"ficha" + (linhaAberta === i ? " aberta" : "")}>
                             <div className="ficha-grade">
@@ -2370,11 +2370,22 @@ tbody:first-of-type .linha td { border-top: none; }
   white-space: nowrap;
 }
 .linha-detalhe td { padding: 0; border: none; }
+/* A linha aberta sobe no empilhamento para o menu "salvar em lista" ficar acima
+   das linhas seguintes da tabela. position:relative cria o contexto necessário. */
+.linha-detalhe { position: relative; z-index: 0; }
+.linha-detalhe.aberta { z-index: 60; }
 .ficha {
   max-height: 0; overflow: hidden;
   transition: max-height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.ficha.aberta { max-height: 460px; }
+/* Quando aberta, liberamos o overflow (com um pequeno atraso, só depois da
+   animação de expandir) para que o popover de salvar possa transbordar a ficha
+   sem ser cortado. Ao fechar, o overflow volta a hidden imediatamente. */
+.ficha.aberta {
+  max-height: 460px;
+  overflow: visible;
+  transition: max-height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), overflow 0s linear 0.5s;
+}
 .ficha-grade {
   display: grid; grid-template-columns: 120px 1fr;
   gap: 20px;
@@ -2660,7 +2671,7 @@ tbody:first-of-type .linha td { border-top: none; }
 .menu-salvar {
   position: absolute; right: 0; bottom: calc(100% + 10px);
   width: 240px; padding: 12px;
-  border-radius: 16px; z-index: 50;
+  border-radius: 16px; z-index: 70;
   text-align: left;
   background: linear-gradient(150deg, rgba(24,19,15,0.92), rgba(24,19,15,0.8));
   border: 1px solid rgba(255,255,255,0.16);
