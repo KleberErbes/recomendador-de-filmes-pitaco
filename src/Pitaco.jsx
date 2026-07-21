@@ -656,6 +656,9 @@ export default function Pitaco() {
   const [erroDetalhe, setErroDetalhe] = useState("");
   const [ultimoPedido, setUltimoPedido] = useState("");
   const [linhaAberta, setLinhaAberta] = useState(null);
+  // Item da lista atualmente expandido (formato "idLista:idItem"), para abrir a
+  // mesma ficha das sugestões ao clicar num título salvo.
+  const [itemListaAberto, setItemListaAberto] = useState(null);
   const [lenteObra, setLenteObra] = useState(null);
   const entradaRef = useRef(null);
   const lenteRef = useRef(null);
@@ -865,6 +868,43 @@ export default function Pitaco() {
   }
   const idxSecao = { descobrir: 0, identificar: 1, listas: 2 }[secaoAtiva] ?? 0;
 
+  // Alinhamento do indicador da navbar: em vez de calcular 1/3 (que sofria
+  // arredondamento e ficava "torto"), medimos a posição REAL do item ativo no
+  // DOM e posicionamos o indicador exatamente sobre ele. Recalcula ao trocar de
+  // aba, ao redimensionar a tela e quando as fontes terminam de carregar (o que
+  // muda a largura dos rótulos).
+  const navLinksRef = useRef(null);
+  const navItensRef = useRef({});
+  const [indicadorEstilo, setIndicadorEstilo] = useState({ opacity: 0 });
+
+  useEffect(() => {
+    function medir() {
+      const container = navLinksRef.current;
+      const alvo = navItensRef.current[secaoAtiva];
+      if (!container || !alvo) return;
+      const cr = container.getBoundingClientRect();
+      const ar = alvo.getBoundingClientRect();
+      setIndicadorEstilo({
+        width: ar.width + "px",
+        transform: "translateX(" + (ar.left - cr.left) + "px)",
+        opacity: 1,
+      });
+    }
+    medir();
+    // Uma segunda medição no próximo frame garante o alinhamento certo já na
+    // primeira pintura (quando o layout às vezes ainda não assentou).
+    const raf = requestAnimationFrame(medir);
+    window.addEventListener("resize", medir);
+    // Refaz a medição quando as fontes carregam (mudam a largura dos textos).
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(medir).catch(() => {});
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", medir);
+    };
+  }, [secaoAtiva, totalSalvos]);
+
   function usarTendencia(obra) {
     setDescricao("algo no clima de " + obra.titulo);
     irPara("descobrir");
@@ -1023,6 +1063,8 @@ Regras:
       ano: obra.ano || null,
       tipo: obra.tipo || "",
       generos: Array.isArray(obra.generos) ? obra.generos.slice(0, 3) : [],
+      sinopse: obra.sinopse || "",
+      porque: obra.porque || "",
     };
   }
 
@@ -1188,10 +1230,10 @@ Regras:
         <button className="nav-marca" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
           pitaco<i aria-hidden="true" />
         </button>
-        <div className="nav-links">
+        <div className="nav-links" ref={navLinksRef}>
           <span
             className="nav-indicador"
-            style={{ transform: "translateX(" + idxSecao * 100 + "%)" }}
+            style={indicadorEstilo}
             aria-hidden="true"
           />
           {[
@@ -1201,6 +1243,7 @@ Regras:
           ].map(([id, rotulo]) => (
             <button
               key={id}
+              ref={(el) => (navItensRef.current[id] = el)}
               className={"nav-item" + (secaoAtiva === id ? " ativo" : "")}
               onClick={() => irPara(id)}
             >
@@ -1396,8 +1439,6 @@ Regras:
                     <tbody key={r.titulo + i}>
                       <tr
                         className={"linha" + (linhaAberta === i ? " aberta" : "")}
-                        data-revelar
-                        style={{ transitionDelay: (i % 6) * 0.05 + "s" }}
                         onMouseEnter={() => setLenteObra(r)}
                         onClick={() => setLinhaAberta(linhaAberta === i ? null : i)}
                       >
@@ -1723,30 +1764,81 @@ Regras:
                     prateleira vazia — use “+ lista” num título para guardar aqui.
                   </p>
                 ) : (
-                  <div className="prat-grade">
-                    {l.itens.map((item, ii) => (
-                      <figure
-                        className="caixa mini acesa prat-item"
-                        key={item.id}
-                        style={{ animationDelay: (ii % 8) * 0.06 + "s" }}
-                      >
-                        <Poster obra={item} url={posters[chaveObra(item)]} classe="caixa-img" />
-                        <figcaption>
-                          <span className="pi-titulo">{item.titulo}</span>
-                          <span className="pi-meta">
-                            {[item.ano, item.tipo].filter(Boolean).join(" · ")}
-                          </span>
-                        </figcaption>
-                        <button
-                          className="pi-remover"
-                          aria-label={"Remover " + item.titulo + " da lista"}
-                          onClick={() => removerItem(l.id, item.id)}
-                        >
-                          ×
-                        </button>
-                      </figure>
-                    ))}
-                  </div>
+                  <>
+                    <div className="prat-grade">
+                      {l.itens.map((item, ii) => {
+                        const chaveAberta = l.id + ":" + item.id;
+                        const estaAberto = itemListaAberto === chaveAberta;
+                        return (
+                          <figure
+                            className={"caixa mini acesa prat-item" + (estaAberto ? " prat-item-ativo" : "")}
+                            key={item.id}
+                            style={{ animationDelay: (ii % 8) * 0.06 + "s" }}
+                            onClick={() =>
+                              setItemListaAberto(estaAberto ? null : chaveAberta)
+                            }
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={estaAberto}
+                          >
+                            <Poster obra={item} url={posters[chaveObra(item)]} classe="caixa-img" />
+                            <figcaption>
+                              <span className="pi-titulo">{item.titulo}</span>
+                              <span className="pi-meta">
+                                {[item.ano, item.tipo].filter(Boolean).join(" · ")}
+                              </span>
+                            </figcaption>
+                            <button
+                              className="pi-remover"
+                              aria-label={"Remover " + item.titulo + " da lista"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removerItem(l.id, item.id);
+                              }}
+                            >
+                              ×
+                            </button>
+                          </figure>
+                        );
+                      })}
+                    </div>
+
+                    {/* Ficha expandida do item clicado — mesma da aba Descobrir */}
+                    {l.itens.map((item) => {
+                      const chaveAberta = l.id + ":" + item.id;
+                      if (itemListaAberto !== chaveAberta) return null;
+                      return (
+                        <div className="ficha-lista" key={"ficha-" + item.id}>
+                          <div className="ficha-grade">
+                            <Poster obra={item} url={posters[chaveObra(item)]} classe="ficha-poster" />
+                            <div className="ficha-texto">
+                              <p className="ficha-meta">
+                                {[
+                                  item.ano,
+                                  (item.tipo || "").toUpperCase(),
+                                  (item.generos || []).slice(0, 3).join(" · ").toUpperCase(),
+                                ]
+                                  .filter(Boolean)
+                                  .join("  ·  ")}
+                              </p>
+                              {item.sinopse && <p className="ficha-sinopse">{item.sinopse}</p>}
+                              {item.porque && (
+                                <p className="ficha-porque">
+                                  <span>por que combina</span> {item.porque}
+                                </p>
+                              )}
+                              {!item.sinopse && !item.porque && (
+                                <p className="ficha-sinopse ficha-sem-info">
+                                  Este título foi salvo antes de guardarmos a sinopse. Novos
+                                  títulos já vêm com a ficha completa.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
                 )}
               </article>
             ))
@@ -1909,19 +2001,20 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   position: relative;
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-/* Indicador desliza sobre o item ativo. Usa translateX de 100% da PRÓPRIA largura
-   (que é exatamente 1/3), então acompanha o grid sem "torto". A animação de
-   deslize dá o efeito suave ao trocar de aba. */
+/* O indicador é posicionado por medição real do item ativo (ver efeito no JS):
+   left/width vêm de getBoundingClientRect, então fica sempre perfeitamente
+   alinhado, sem o "torto" do cálculo por 1/3. Anima transform e largura juntos. */
 .nav-indicador {
   position: absolute; top: 4px; bottom: 4px; left: 0;
-  width: calc(100% / 3);
   background: var(--branco);
   border: 1px solid rgba(255,255,255,0.9);
   border-radius: 999px;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 2px 10px rgba(0,0,0,0.25);
-  transition: transform 0.55s cubic-bezier(0.3, 1.5, 0.35, 1);
+  transition: transform 0.5s cubic-bezier(0.3, 1.3, 0.35, 1),
+              width 0.5s cubic-bezier(0.3, 1.3, 0.35, 1),
+              opacity 0.2s ease;
   pointer-events: none;
-  will-change: transform;
+  will-change: transform, width;
 }
 .nav-item {
   position: relative; z-index: 1;
@@ -2845,8 +2938,29 @@ tbody:first-of-type .linha td { border-top: none; }
   line-height: 1.8;
 }
 .prat-grade { display: flex; flex-wrap: wrap; gap: 16px; }
-.prat-item { position: relative; width: 118px; }
+.prat-item { position: relative; width: 118px; cursor: pointer; }
 .prat-item:hover { filter: brightness(1.12); transform: translateY(-4px); }
+/* Miniatura aberta: contorno para indicar que a ficha abaixo é dela. */
+.prat-item-ativo { filter: brightness(1.12); }
+.prat-item-ativo .caixa-img {
+  outline: 2px solid var(--vermelho);
+  outline-offset: 2px;
+}
+/* Painel de ficha do item da lista — mesmo visual da ficha das sugestões, mas
+   sobre o fundo escuro da seção Listas. Abre logo abaixo da grade. */
+.ficha-lista {
+  margin-top: 18px;
+  padding: 20px;
+  border-radius: 16px;
+  background: linear-gradient(150deg, rgba(24,19,15,0.6), rgba(24,19,15,0.35));
+  border: 1px solid rgba(255,255,255,0.12);
+  animation: brotarMenu 0.3s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+.ficha-lista .ficha-grade { padding: 0; grid-template-columns: 120px 1fr; }
+.ficha-lista .ficha-meta { color: var(--luz); }
+.ficha-lista .ficha-sinopse { color: var(--branco); }
+.ficha-lista .ficha-porque { color: rgba(246,243,236,0.75); }
+.ficha-sem-info { color: rgba(246,243,236,0.55); font-style: italic; }
 .prat-item figcaption { padding: 8px 3px 2px; display: grid; gap: 2px; }
 .pi-titulo {
   font-weight: 700; font-size: 12.5px; line-height: 1.2;
