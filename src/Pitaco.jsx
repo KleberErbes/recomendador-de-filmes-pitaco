@@ -125,7 +125,7 @@ function esperar(ms) {
 // Fala com a NOSSA function /api/recomendar, que repassa para a Anthropic
 // com a chave guardada no servidor. Aceita string (texto puro) OU array de
 // blocos (texto + imagem, usado na identificação por frame).
-async function chamarIA(conteudo, querJson = false, esquema = null) {
+async function chamarIA(conteudo, querJson = false, esquema = null, maxTokens = null) {
   let ultimoErro = null;
   for (let tentativa = 1; tentativa <= 3; tentativa++) {
     try {
@@ -136,6 +136,7 @@ async function chamarIA(conteudo, querJson = false, esquema = null) {
           messages: [{ role: "user", content: conteudo }],
           json: querJson,
           esquema,
+          ...(maxTokens ? { maxTokens } : {}),
         }),
       });
       const data = await response.json();
@@ -669,6 +670,7 @@ export default function Pitaco() {
   const [carregandoId, setCarregandoId] = useState(false);
   const [resId, setResId] = useState(null);
   const [erroId, setErroId] = useState("");
+  const [erroIdDetalhe, setErroIdDetalhe] = useState("");
   const inputArquivoRef = useRef(null);
 
   // --- Listas ---
@@ -1006,6 +1008,7 @@ Responda SOMENTE com JSON válido, sem markdown, sem crase, sem nenhum texto ant
       return;
     }
     setErroId("");
+    setErroIdDetalhe("");
     setResId(null);
     setCarregandoId(true);
 
@@ -1028,7 +1031,7 @@ Regras:
           source: { type: "base64", media_type: imagem.media_type, data: imagem.data },
         },
         { type: "text", text: prompt },
-      ], true, "identificar");
+      ], true, "identificar", 2000);
 
       let parsed;
       try {
@@ -1044,6 +1047,7 @@ Regras:
     } catch (e) {
       console.error(e);
       setErroId("Não consegui analisar a imagem agora. Tente de novo em alguns segundos.");
+      setErroIdDetalhe(String(e && e.message ? e.message : e).slice(0, 300));
     } finally {
       setCarregandoId(false);
     }
@@ -1585,6 +1589,7 @@ Regras:
             {erroId && (
               <div className="erro na-faixa">
                 <p>{erroId}</p>
+                {erroIdDetalhe && <p className="erro-detalhe">detalhe técnico: {erroIdDetalhe}</p>}
               </div>
             )}
           </div>

@@ -108,11 +108,17 @@ function paraContentsGemini(messages) {
 }
 
 // Extrai o texto da resposta do Gemini e devolve no formato que o front espera:
-// { content: [{ type: "text", text }] }
+// { content: [{ type: "text", text }] }. Se a resposta veio vazia, inclui o
+// motivo (finishReason) para o front conseguir diagnosticar (ex.: MAX_TOKENS,
+// SAFETY) em vez de só receber texto em branco.
 function paraRespostaAnthropic(dadosGemini) {
-  const partes =
-    dadosGemini?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean) || [];
+  const candidato = dadosGemini?.candidates?.[0];
+  const partes = candidato?.content?.parts?.map((p) => p.text).filter(Boolean) || [];
   const texto = partes.join("\n");
+  if (!texto) {
+    const motivo = candidato?.finishReason || "sem conteúdo";
+    return { content: [{ type: "text", text: "" }], _motivo: motivo };
+  }
   return { content: [{ type: "text", text: texto }] };
 }
 
@@ -138,6 +144,10 @@ export default async function handler(req, res) {
     // Nome do schema a aplicar ("recomendacoes" ou "identificar"). Opcional: se
     // vier um schema conhecido, o modo JSON fica ainda mais rígido.
     const esquema = SCHEMAS[corpo.esquema];
+    // Teto de tokens de saída. Análise de imagem precisa de mais folga porque os
+    // tokens de "pensamento" (linha 3.x) também contam aqui — se faltar, a
+    // resposta volta vazia/cortada. O front pode pedir um valor maior.
+    const maxTokens = Number.isFinite(corpo.maxTokens) ? corpo.maxTokens : 1200;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: { message: "Campo 'messages' ausente ou inválido." } });
@@ -145,7 +155,7 @@ export default async function handler(req, res) {
 
     const contents = paraContentsGemini(messages);
     const generationConfig = {
-      maxOutputTokens: 1200,
+      maxOutputTokens: maxTokens,
       // Reduz o "pensamento" do modelo (linha Gemini 3.x). Sem isso, o modelo às
       // vezes escreve o raciocínio (ex.: contando palavras) junto da resposta, o
       // que suja o JSON. Com "low" ele vai direto ao ponto — mais rápido e barato.
@@ -183,7 +193,18 @@ export default async function handler(req, res) {
       const dados = await resposta.json();
 
       if (resposta.ok && !dados.error) {
-        return res.status(200).json(paraRespostaAnthropic(dados));
+        const convertida = paraRespostaAnthropic(dados);
+        // Resposta vazia (ex.: estourou tokens no "pensamento", ou bloqueio de
+        // segurança). Devolve erro explicativo em vez de texto em branco, que
+        // quebraria o parse no front sem dizer o porquê.
+        if (convertida._motivo) {
+          const dica =
+            convertida._motivo === "MAX_TOKENS"
+              ? "resposta cortada por limite de tokens — tente aumentar maxTokens."
+              : "motivo: " + convertida._motivo;
+          return res.status(502).json({ error: { message: "Modelo retornou vazio (" + dica + ")" } });
+        }
+        return res.status(200).json(convertida);
       }
 
       const status = resposta.status;
