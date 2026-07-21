@@ -78,22 +78,26 @@ export default async function handler(req, res) {
     // Em algumas configurações o corpo já vem como objeto; em outras, como string.
     const corpo = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
     const messages = corpo.messages;
+    // Quando o front pede json:true, ativamos o modo JSON nativo do Gemini, que
+    // força a saída a ser JSON puro (sem markdown, sem asteriscos, sem texto solto).
+    const querJson = corpo.json === true;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: { message: "Campo 'messages' ausente ou inválido." } });
     }
 
     const contents = paraContentsGemini(messages);
-    const corpoGemini = JSON.stringify({
-      contents,
-      generationConfig: {
-        maxOutputTokens: 1200,
-        // Opcional (linha Gemini 3.x): controla o quanto o modelo "pensa" antes
-        // de responder. Menos "pensamento" = mais rápido e barato. Descomente e
-        // ajuste se quiser: "low" (rápido) | "medium" | "high" (mais elaborado).
-        // thinkingConfig: { thinkingLevel: "low" },
-      },
-    });
+    const generationConfig = {
+      maxOutputTokens: 1200,
+      // Opcional (linha Gemini 3.x): controla o quanto o modelo "pensa" antes
+      // de responder. Menos "pensamento" = mais rápido e barato. Descomente e
+      // ajuste se quiser: "low" (rápido) | "medium" | "high" (mais elaborado).
+      // thinkingConfig: { thinkingLevel: "low" },
+    };
+    if (querJson) {
+      generationConfig.responseMimeType = "application/json";
+    }
+    const corpoGemini = JSON.stringify({ contents, generationConfig });
 
     let ultimoErro = { status: 500, message: "Nenhum modelo respondeu." };
 

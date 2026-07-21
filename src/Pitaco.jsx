@@ -104,7 +104,7 @@ function esperar(ms) {
 // Fala com a NOSSA function /api/recomendar, que repassa para a Anthropic
 // com a chave guardada no servidor. Aceita string (texto puro) OU array de
 // blocos (texto + imagem, usado na identificação por frame).
-async function chamarIA(conteudo) {
+async function chamarIA(conteudo, querJson = false) {
   let ultimoErro = null;
   for (let tentativa = 1; tentativa <= 3; tentativa++) {
     try {
@@ -113,6 +113,7 @@ async function chamarIA(conteudo) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [{ role: "user", content: conteudo }],
+          json: querJson,
         }),
       });
       const data = await response.json();
@@ -882,7 +883,7 @@ Responda SOMENTE com JSON válido, sem markdown, sem crase, sem nenhum texto ant
 {"recomendacoes":[{"titulo":"...","ano":2014,"tipo":"filme ou série","generos":["...","..."],"sinopse":"frase curta, sem spoiler","porque":"por que combina com o pedido"}]}`;
 
     try {
-      const texto = await chamarIA(prompt);
+      const texto = await chamarIA(prompt, true);
 
       let parsed;
       try {
@@ -952,7 +953,7 @@ Regras:
           source: { type: "base64", media_type: imagem.media_type, data: imagem.data },
         },
         { type: "text", text: prompt },
-      ]);
+      ], true);
 
       let parsed;
       try {
