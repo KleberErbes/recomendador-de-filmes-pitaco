@@ -351,6 +351,17 @@ function desenharCapa(ctx, img, x, y, w, h, r) {
   ctx.restore();
 }
 
+// Converte uma URL de pôster do TMDB para a NOSSA rota /api/poster (mesma
+// origem). Isso é essencial só na geração do PNG: imagens de outra origem
+// "contaminam" o canvas e impedem o toBlob. Se não for uma URL do TMDB (ou já
+// for local), devolve como está.
+function urlMesmaOrigem(url) {
+  if (!url) return url;
+  const m = /^https?:\/\/image\.tmdb\.org\/t\/p\/[^/]+(\/[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp))$/i.exec(url);
+  if (!m) return url;
+  return "/api/poster?size=w500&path=" + encodeURIComponent(m[1]);
+}
+
 // Carrega um pôster com CORS liberado (o CDN do TMDB permite), para o
 // canvas não ficar "contaminado" e o PNG poder ser exportado.
 function carregarImagem(url) {
@@ -361,7 +372,8 @@ function carregarImagem(url) {
     const t = setTimeout(() => res(null), 7000);
     im.onload = () => { clearTimeout(t); res(im); };
     im.onerror = () => { clearTimeout(t); res(null); };
-    im.src = url;
+    // Passa pela nossa origem para o canvas exportar sem erro de CORS.
+    im.src = urlMesmaOrigem(url);
   });
 }
 
