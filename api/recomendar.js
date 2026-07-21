@@ -18,6 +18,60 @@
 // próximo. O gemini-2.5-flash é o fallback seguro que funciona no nível gratuito.
 const MODELOS = ["gemini-3.6-flash", "gemini-2.5-flash"];
 
+// Schemas de saída (subset do OpenAPI que o Gemini aceita em responseSchema).
+// Forçar o schema é bem mais confiável do que só pedir "responda em JSON" no
+// prompt: o modelo é OBRIGADO a devolver exatamente esta estrutura, sem markdown.
+const SCHEMAS = {
+  // Recomendações da aba Descobrir.
+  recomendacoes: {
+    type: "object",
+    properties: {
+      recomendacoes: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            titulo: { type: "string" },
+            ano: { type: "integer" },
+            tipo: { type: "string" },
+            generos: { type: "array", items: { type: "string" } },
+            sinopse: { type: "string" },
+            porque: { type: "string" },
+          },
+          required: ["titulo", "ano", "tipo", "sinopse", "porque"],
+        },
+      },
+    },
+    required: ["recomendacoes"],
+  },
+  // Identificação de obra a partir de uma imagem (aba Identificar).
+  identificar: {
+    type: "object",
+    properties: {
+      encontrado: { type: "boolean" },
+      titulo: { type: "string" },
+      titulo_original: { type: "string" },
+      ano: { type: "integer" },
+      tipo: { type: "string" },
+      generos: { type: "array", items: { type: "string" } },
+      confianca: { type: "string" },
+      pistas: { type: "string" },
+      alternativas: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            titulo: { type: "string" },
+            ano: { type: "integer" },
+            tipo: { type: "string" },
+          },
+        },
+      },
+    },
+    required: ["encontrado"],
+  },
+};
+
 // Converte o array de mensagens estilo Anthropic para o formato "contents" do
 // Gemini. O Gemini usa: { role: "user" | "model", parts: [{ text } | { inlineData }] }
 function paraContentsGemini(messages) {
@@ -81,6 +135,9 @@ export default async function handler(req, res) {
     // Quando o front pede json:true, ativamos o modo JSON nativo do Gemini, que
     // força a saída a ser JSON puro (sem markdown, sem asteriscos, sem texto solto).
     const querJson = corpo.json === true;
+    // Nome do schema a aplicar ("recomendacoes" ou "identificar"). Opcional: se
+    // vier um schema conhecido, o modo JSON fica ainda mais rígido.
+    const esquema = SCHEMAS[corpo.esquema];
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: { message: "Campo 'messages' ausente ou inválido." } });
@@ -89,13 +146,16 @@ export default async function handler(req, res) {
     const contents = paraContentsGemini(messages);
     const generationConfig = {
       maxOutputTokens: 1200,
-      // Opcional (linha Gemini 3.x): controla o quanto o modelo "pensa" antes
-      // de responder. Menos "pensamento" = mais rápido e barato. Descomente e
-      // ajuste se quiser: "low" (rápido) | "medium" | "high" (mais elaborado).
-      // thinkingConfig: { thinkingLevel: "low" },
+      // Reduz o "pensamento" do modelo (linha Gemini 3.x). Sem isso, o modelo às
+      // vezes escreve o raciocínio (ex.: contando palavras) junto da resposta, o
+      // que suja o JSON. Com "low" ele vai direto ao ponto — mais rápido e barato.
+      // Modelos que não suportam esse campo simplesmente o ignoram.
+      thinkingConfig: { thinkingLevel: "low" },
     };
     if (querJson) {
       generationConfig.responseMimeType = "application/json";
+      // responseMimeType + responseSchema juntos = saída garantidamente estruturada.
+      if (esquema) generationConfig.responseSchema = esquema;
     }
     const corpoGemini = JSON.stringify({ contents, generationConfig });
 

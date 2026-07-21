@@ -61,39 +61,60 @@ const FRASES_IDENTIFICAR = [
 
 // ====================== UTILIDADES DE JSON ======================
 // Extrai o JSON da resposta; se vier cortado, recupera os objetos completos
+// Extrai o primeiro objeto JSON completo e balanceado de dentro de um texto,
+// ignorando qualquer "lixo" antes ou depois (ex.: quando o modelo escreve um
+// raciocínio ou contagem de palavras junto). Varre caractere a caractere
+// respeitando strings e escapes, então para no fecha-chaves que zera o nível.
 function extrairJson(texto) {
   const limpo = texto.replace(/```json|```/g, "").trim();
   const inicio = limpo.indexOf("{");
   if (inicio === -1) throw new Error("resposta sem JSON");
-  const bruto = limpo.slice(inicio);
-  try {
-    return JSON.parse(bruto.slice(0, bruto.lastIndexOf("}") + 1));
-  } catch (errOriginal) {
-    const abre = bruto.indexOf("[");
-    if (abre === -1) throw errOriginal;
-    const objetos = [];
-    let nivel = 0;
-    let inicioObj = -1;
-    let emString = false;
-    let escape = false;
-    for (let i = abre + 1; i < bruto.length; i++) {
-      const c = bruto[i];
-      if (escape) { escape = false; continue; }
-      if (c === "\\") { escape = true; continue; }
-      if (c === '"') { emString = !emString; continue; }
-      if (emString) continue;
-      if (c === "{") { if (nivel === 0) inicioObj = i; nivel++; }
-      else if (c === "}") {
-        nivel--;
-        if (nivel === 0 && inicioObj !== -1) {
-          try { objetos.push(JSON.parse(bruto.slice(inicioObj, i + 1))); } catch (e) {}
-          inicioObj = -1;
-        }
-      } else if (c === "]" && nivel === 0) { break; }
+
+  // 1) Tentativa robusta: acha o objeto balanceado começando no primeiro "{".
+  let nivel = 0;
+  let emString = false;
+  let escape = false;
+  for (let i = inicio; i < limpo.length; i++) {
+    const c = limpo[i];
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') { emString = !emString; continue; }
+    if (emString) continue;
+    if (c === "{") nivel++;
+    else if (c === "}") {
+      nivel--;
+      if (nivel === 0) {
+        const candidato = limpo.slice(inicio, i + 1);
+        try { return JSON.parse(candidato); } catch (e) { break; }
+      }
     }
-    if (objetos.length === 0) throw errOriginal;
-    return { recomendacoes: objetos };
   }
+
+  // 2) Plano B: reaproveita objetos soltos dentro do primeiro array, montando
+  // { recomendacoes: [...] } — cobre casos de JSON cortado no fim (max tokens).
+  const bruto = limpo.slice(inicio);
+  const abre = bruto.indexOf("[");
+  if (abre === -1) throw new Error("JSON inválido na resposta");
+  const objetos = [];
+  nivel = 0; emString = false; escape = false;
+  let inicioObj = -1;
+  for (let i = abre + 1; i < bruto.length; i++) {
+    const c = bruto[i];
+    if (escape) { escape = false; continue; }
+    if (c === "\\") { escape = true; continue; }
+    if (c === '"') { emString = !emString; continue; }
+    if (emString) continue;
+    if (c === "{") { if (nivel === 0) inicioObj = i; nivel++; }
+    else if (c === "}") {
+      nivel--;
+      if (nivel === 0 && inicioObj !== -1) {
+        try { objetos.push(JSON.parse(bruto.slice(inicioObj, i + 1))); } catch (e) {}
+        inicioObj = -1;
+      }
+    } else if (c === "]" && nivel === 0) { break; }
+  }
+  if (objetos.length === 0) throw new Error("JSON inválido na resposta");
+  return { recomendacoes: objetos };
 }
 
 function esperar(ms) {
@@ -104,7 +125,7 @@ function esperar(ms) {
 // Fala com a NOSSA function /api/recomendar, que repassa para a Anthropic
 // com a chave guardada no servidor. Aceita string (texto puro) OU array de
 // blocos (texto + imagem, usado na identificação por frame).
-async function chamarIA(conteudo, querJson = false) {
+async function chamarIA(conteudo, querJson = false, esquema = null) {
   let ultimoErro = null;
   for (let tentativa = 1; tentativa <= 3; tentativa++) {
     try {
@@ -114,6 +135,7 @@ async function chamarIA(conteudo, querJson = false) {
         body: JSON.stringify({
           messages: [{ role: "user", content: conteudo }],
           json: querJson,
+          esquema,
         }),
       });
       const data = await response.json();
@@ -883,7 +905,7 @@ Responda SOMENTE com JSON válido, sem markdown, sem crase, sem nenhum texto ant
 {"recomendacoes":[{"titulo":"...","ano":2014,"tipo":"filme ou série","generos":["...","..."],"sinopse":"frase curta, sem spoiler","porque":"por que combina com o pedido"}]}`;
 
     try {
-      const texto = await chamarIA(prompt, true);
+      const texto = await chamarIA(prompt, true, "recomendacoes");
 
       let parsed;
       try {
@@ -953,7 +975,7 @@ Regras:
           source: { type: "base64", media_type: imagem.media_type, data: imagem.data },
         },
         { type: "text", text: prompt },
-      ], true);
+      ], true, "identificar");
 
       let parsed;
       try {
