@@ -1,4 +1,15 @@
 import { useState, useEffect, useRef, useMemo } from "react";
+import {
+  contaLigada,
+  pegarSessao,
+  aoMudarSessao,
+  entrar as entrarNaConta,
+  criarConta,
+  sair as sairDaConta,
+  recuperarSenha,
+  carregarListasDaNuvem,
+  salvarListasNaNuvem,
+} from "./nuvem.js";
 
 /*
   PITACO — arquivo pessoal de cinema com IA
@@ -321,6 +332,28 @@ async function salvarListasNoStorage(listas) {
 
 function novoId(prefixo) {
   return prefixo + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// Junta as listas que estavam no aparelho com as que vieram da nuvem.
+// Usado no primeiro login: em vez de escolher uma e descartar a outra, casamos
+// pelo nome da lista e, dentro dela, evitamos repetir o mesmo título.
+function juntarListas(daNuvem, doAparelho) {
+  const resultado = (daNuvem || []).map((l) => ({ ...l, itens: [...(l.itens || [])] }));
+  for (const local of doAparelho || []) {
+    const igual = resultado.find(
+      (l) => (l.nome || "").trim().toLowerCase() === (local.nome || "").trim().toLowerCase()
+    );
+    if (!igual) {
+      resultado.push({ ...local, itens: [...(local.itens || [])] });
+      continue;
+    }
+    for (const item of local.itens || []) {
+      if (!igual.itens.some((i) => mesmaObra(i, item))) {
+        igual.itens.push({ ...item, id: novoId("item") });
+      }
+    }
+  }
+  return resultado;
 }
 
 function mesmaObra(a, b) {
@@ -688,6 +721,19 @@ export default function Pitaco() {
   // Área do resultado da identificação, para rolar até ela quando o Pitaco acha.
   const resultadoIdRef = useRef(null);
 
+  // --- Conta do usuário ---
+  const [sessao, setSessao] = useState(null);
+  const [sessaoPronta, setSessaoPronta] = useState(false);
+  const [contaAberta, setContaAberta] = useState(false);
+  const [modoConta, setModoConta] = useState("entrar"); // "entrar" | "criar"
+  const [emailConta, setEmailConta] = useState("");
+  const [senhaConta, setSenhaConta] = useState("");
+  const [erroConta, setErroConta] = useState("");
+  const [avisoConta, setAvisoConta] = useState("");
+  const [ocupadoConta, setOcupadoConta] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const usuario = sessao && sessao.user ? sessao.user : null;
+
   // --- Descobrir ---
   const [descricao, setDescricao] = useState("");
   const [tipo, setTipo] = useState("tanto faz");
@@ -745,22 +791,75 @@ export default function Pitaco() {
   }, [tendencias]);
 
   // ------------------------ EFEITOS ----------------------------
-  // Listas salvas
+  // Descobre se já existe alguém logado e fica de olho em entradas/saídas.
   useEffect(() => {
     let ativo = true;
     (async () => {
-      const salvas = await carregarListasSalvas();
-      if (ativo) {
-        setListas(Array.isArray(salvas) ? salvas : []);
+      const s = await pegarSessao();
+      if (!ativo) return;
+      setSessao(s);
+      setSessaoPronta(true);
+    })();
+    const cancelar = aoMudarSessao((s) => {
+      if (ativo) setSessao(s);
+    });
+    return () => { ativo = false; cancelar(); };
+  }, []);
+
+  // Carrega as listas. Sem conta, lê do aparelho (como sempre foi). Com conta,
+  // lê da nuvem — e, no primeiro login, junta o que já estava salvo aqui para
+  // nada se perder.
+  useEffect(() => {
+    if (!sessaoPronta) return;
+    let ativo = true;
+    (async () => {
+      const locais = await carregarListasSalvas();
+      const listasLocais = Array.isArray(locais) ? locais : [];
+
+      if (!usuario) {
+        if (!ativo) return;
+        setListas(listasLocais);
         setListasProntas(true);
+        return;
+      }
+
+      setSincronizando(true);
+      try {
+        const daNuvem = await carregarListasDaNuvem(usuario.id);
+        const juntas = listasLocais.length ? juntarListas(daNuvem, listasLocais) : daNuvem;
+        if (!ativo) return;
+        setListas(juntas);
+        setListasProntas(true);
+        // Se a junção acrescentou algo, devolve para a nuvem já organizada.
+        if (listasLocais.length) {
+          await salvarListasNaNuvem(usuario.id, juntas);
+        }
+      } catch (e) {
+        // Falhou a nuvem (offline, por exemplo): segue com o que há no aparelho
+        // para o app continuar utilizável.
+        if (!ativo) return;
+        setListas(listasLocais);
+        setListasProntas(true);
+        setErroConta(String(e.message || e));
+      } finally {
+        if (ativo) setSincronizando(false);
       }
     })();
     return () => { ativo = false; };
-  }, []);
+  }, [sessaoPronta, usuario && usuario.id]);
 
+  // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
+  // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
+  // gravação a cada clique.
   useEffect(() => {
-    if (listasProntas) salvarListasNoStorage(listas);
-  }, [listas, listasProntas]);
+    if (!listasProntas) return;
+    salvarListasNoStorage(listas);
+    if (!usuario) return;
+    const t = setTimeout(() => {
+      salvarListasNaNuvem(usuario.id, listas).catch(() => {});
+    }, 600);
+    return () => clearTimeout(t);
+  }, [listas, listasProntas, usuario && usuario.id]);
 
   // Tendências para acender a parede
   useEffect(() => {
@@ -961,9 +1060,82 @@ export default function Pitaco() {
     };
   }, []);
 
+  // ------------------------- CONTA -----------------------------
+  function abrirConta(modo) {
+    setModoConta(modo || "entrar");
+    setErroConta("");
+    setAvisoConta("");
+    setContaAberta(true);
+  }
+
+  async function enviarFormularioConta() {
+    const email = emailConta.trim();
+    const senha = senhaConta;
+    setErroConta("");
+    setAvisoConta("");
+
+    if (!email || !senha) {
+      setErroConta("Preencha e-mail e senha.");
+      return;
+    }
+    if (modoConta === "criar" && senha.length < 6) {
+      setErroConta("A senha precisa ter pelo menos 6 caracteres.");
+      return;
+    }
+
+    setOcupadoConta(true);
+    try {
+      if (modoConta === "criar") {
+        const { precisaConfirmarEmail } = await criarConta(email, senha);
+        if (precisaConfirmarEmail) {
+          setAvisoConta(
+            "Conta criada! Enviamos um link de confirmação para " +
+              email +
+              ". Confirme e depois entre por aqui."
+          );
+          setModoConta("entrar");
+        } else {
+          setContaAberta(false);
+        }
+      } else {
+        await entrarNaConta(email, senha);
+        setContaAberta(false);
+      }
+      setSenhaConta("");
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  async function pedirNovaSenha() {
+    const email = emailConta.trim();
+    setErroConta("");
+    setAvisoConta("");
+    if (!email) {
+      setErroConta("Escreva seu e-mail primeiro para eu enviar o link.");
+      return;
+    }
+    setOcupadoConta(true);
+    try {
+      await recuperarSenha(email);
+      setAvisoConta("Se existir conta com esse e-mail, o link de nova senha chegou nele.");
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  async function sairELimpar() {
+    await sairDaConta();
+    setContaAberta(false);
+    // As listas continuam no aparelho; a nuvem guarda a versão da conta.
+  }
+
   // ----------------------- NAVEGAÇÃO ---------------------------
-  function irPara(id) {
-    const alvo = document.getElementById("secao-" + id);
+  function irPara(id) {    const alvo = document.getElementById("secao-" + id);
     if (alvo) alvo.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   const totalSalvos = listas.reduce((soma, l) => soma + l.itens.length, 0);
@@ -1308,6 +1480,20 @@ Regras:
               <path d="M15.4 15.4 20 20" />
             </svg>
           </button>
+          {contaLigada && (
+            <button
+              className={"nav-botao" + (usuario ? " logado" : "")}
+              onClick={() => abrirConta("entrar")}
+              title={usuario ? "Sua conta (" + usuario.email + ")" : "Entrar na sua conta"}
+              aria-label={usuario ? "Sua conta" : "Entrar na sua conta"}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="12" cy="8.5" r="3.8" />
+                <path d="M4.8 20a7.2 7.2 0 0 1 14.4 0" />
+              </svg>
+              {sincronizando && <i className="nav-sinc" aria-hidden="true" />}
+            </button>
+          )}
           <button
             className="nav-botao"
             onClick={() => irPara("listas")}
@@ -1399,6 +1585,114 @@ Regras:
                 </ul>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* painel da conta: entrar, criar conta ou ver quem está logado */}
+      {contaAberta && (
+        <div className="busca-fundo" onClick={() => setContaAberta(false)} role="presentation">
+          <div
+            className="conta-caixa vidro"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sua conta"
+          >
+            <button
+              className="busca-fechar conta-fechar"
+              onClick={() => setContaAberta(false)}
+              aria-label="Fechar"
+            >
+              ×
+            </button>
+
+            {usuario ? (
+              <>
+                <p className="conta-etiqueta">conectado como</p>
+                <p className="conta-email">{usuario.email}</p>
+                <p className="conta-texto">
+                  Suas listas estão salvas na sua conta — é só entrar em outro
+                  aparelho para encontrá-las lá.
+                </p>
+                <button className="conta-botao" onClick={sairELimpar}>
+                  sair da conta
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="conta-abas" role="tablist">
+                  <button
+                    role="tab"
+                    aria-selected={modoConta === "entrar"}
+                    className={"conta-aba" + (modoConta === "entrar" ? " ativa" : "")}
+                    onClick={() => { setModoConta("entrar"); setErroConta(""); setAvisoConta(""); }}
+                  >
+                    entrar
+                  </button>
+                  <button
+                    role="tab"
+                    aria-selected={modoConta === "criar"}
+                    className={"conta-aba" + (modoConta === "criar" ? " ativa" : "")}
+                    onClick={() => { setModoConta("criar"); setErroConta(""); setAvisoConta(""); }}
+                  >
+                    criar conta
+                  </button>
+                </div>
+
+                <p className="conta-texto">
+                  {modoConta === "criar"
+                    ? "Crie uma conta para suas listas te acompanharem em qualquer aparelho."
+                    : "Entre para reencontrar suas listas salvas."}
+                </p>
+
+                <label className="conta-campo">
+                  <span>e-mail</span>
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    value={emailConta}
+                    onChange={(e) => setEmailConta(e.target.value)}
+                    placeholder="voce@email.com"
+                  />
+                </label>
+
+                <label className="conta-campo">
+                  <span>senha</span>
+                  <input
+                    type="password"
+                    autoComplete={modoConta === "criar" ? "new-password" : "current-password"}
+                    value={senhaConta}
+                    onChange={(e) => setSenhaConta(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !ocupadoConta) enviarFormularioConta();
+                    }}
+                    placeholder={modoConta === "criar" ? "pelo menos 6 caracteres" : "sua senha"}
+                  />
+                </label>
+
+                {erroConta && <p className="conta-erro">{erroConta}</p>}
+                {avisoConta && <p className="conta-aviso">{avisoConta}</p>}
+
+                <button
+                  className="conta-botao principal"
+                  onClick={enviarFormularioConta}
+                  disabled={ocupadoConta}
+                >
+                  {ocupadoConta
+                    ? "só um instante…"
+                    : modoConta === "criar"
+                    ? "criar minha conta"
+                    : "entrar"}
+                </button>
+
+                {modoConta === "entrar" && (
+                  <button className="conta-link" onClick={pedirNovaSenha} disabled={ocupadoConta}>
+                    esqueci minha senha
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2197,6 +2491,106 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   background: var(--vermelho); color: #fff;
   padding: 3px 5px; border-radius: 999px;
   border: 2px solid var(--preto);
+}
+
+/* ======================== CONTA ============================== */
+/* Bolinha no ícone quando há alguém logado, e pulso enquanto sincroniza. */
+.nav-botao.logado { color: var(--branco); border-color: rgba(255,255,255,0.4); }
+.nav-botao.logado:hover { color: var(--preto); }
+.nav-sinc {
+  position: absolute; bottom: -2px; right: -2px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ambar);
+  border: 2px solid var(--preto);
+  animation: pulsoLuz 1.2s ease-in-out infinite;
+}
+.conta-caixa {
+  position: relative;
+  width: min(400px, 100%);
+  align-self: flex-start;
+  padding: 26px 24px 24px;
+  border-radius: 20px;
+  display: grid; gap: 12px;
+  animation: brotarBusca 0.26s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+.conta-fechar { position: absolute; top: 10px; right: 10px; }
+.conta-abas {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px; margin-bottom: 2px;
+}
+.conta-aba {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(246,243,236,0.6);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.14);
+  padding: 10px 8px; border-radius: 999px; cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.conta-aba.ativa { background: var(--branco); color: var(--preto); border-color: var(--branco); }
+.conta-texto {
+  margin: 0; font-size: 13px; line-height: 1.55;
+  color: rgba(246,243,236,0.65);
+}
+.conta-etiqueta {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: rgba(246,243,236,0.45);
+}
+.conta-email { margin: 0; font-weight: 700; font-size: 17px; color: var(--branco); }
+.conta-campo { display: grid; gap: 5px; }
+.conta-campo span {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+}
+.conta-campo input {
+  background: rgba(0,0,0,0.28);
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 12px;
+  color: var(--branco);
+  font-family: 'Archivo', sans-serif; font-size: 15px;
+  padding: 11px 13px;
+}
+.conta-campo input::placeholder { color: rgba(246,243,236,0.32); }
+.conta-campo input:focus { outline: 2px solid var(--vermelho); outline-offset: 1px; }
+.conta-botao {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--branco);
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.2);
+  padding: 13px; border-radius: 999px; cursor: pointer;
+  transition: filter 0.18s ease, background 0.18s ease;
+}
+.conta-botao:hover { background: rgba(255,255,255,0.14); }
+.conta-botao.principal {
+  background: var(--vermelho); border-color: var(--vermelho);
+  margin-top: 4px;
+}
+.conta-botao.principal:hover { filter: brightness(1.12); }
+.conta-botao:disabled { opacity: 0.6; cursor: default; }
+.conta-link {
+  background: none; border: none; cursor: pointer;
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+  padding: 4px; justify-self: center;
+}
+.conta-link:hover { color: var(--branco); }
+.conta-erro, .conta-aviso {
+  margin: 0; font-size: 13px; line-height: 1.5;
+  padding: 10px 12px; border-radius: 12px;
+}
+.conta-erro {
+  color: #ffd7d2;
+  background: rgba(230,57,43,0.16);
+  border: 1px solid rgba(230,57,43,0.4);
+}
+.conta-aviso {
+  color: var(--luz);
+  background: rgba(240,146,30,0.14);
+  border: 1px solid rgba(240,146,30,0.36);
 }
 
 /* ===================== BUSCA POR TÍTULO ====================== */
