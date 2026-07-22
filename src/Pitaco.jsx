@@ -224,6 +224,29 @@ async function buscarTendencias() {
   }
 }
 
+// Busca títulos pelo nome (usada pela lupa do menu).
+async function buscarObras(termo) {
+  const limpo = (termo || "").trim();
+  if (!TMDB_ATIVO || limpo.length < 2) return [];
+  try {
+    const resp = await fetch(
+      "/api/tmdb?rota=search/multi&language=pt-BR&query=" + encodeURIComponent(limpo)
+    );
+    const dados = await resp.json();
+    return (dados.results || [])
+      .filter((r) => r.media_type === "movie" || r.media_type === "tv")
+      .slice(0, 12)
+      .map((r) => ({
+        titulo: r.title || r.name,
+        ano: parseInt((r.release_date || r.first_air_date || "").slice(0, 4), 10) || null,
+        tipo: r.media_type === "movie" ? "filme" : "série",
+        poster: r.poster_path ? "https://image.tmdb.org/t/p/w342" + r.poster_path : null,
+      }));
+  } catch (e) {
+    return [];
+  }
+}
+
 // ================== PREPARO DA IMAGEM (PRINT) ===================
 // Reduz para no máximo 1400px e converte para JPEG antes do envio.
 async function prepararImagem(arquivo) {
@@ -645,6 +668,16 @@ function BotaoSalvar({
 // ======================= COMPONENTE RAIZ ========================
 export default function Pitaco() {
   // --- Navegação / página ---
+  // Menu encolhe ao rolar para baixo e volta ao normal ao rolar para cima.
+  const [navCompacta, setNavCompacta] = useState(false);
+  // Busca por título (ícone de lupa no menu).
+  const [buscaAberta, setBuscaAberta] = useState(false);
+  const [termoBusca, setTermoBusca] = useState("");
+  const [resBusca, setResBusca] = useState([]);
+  const [buscandoObras, setBuscandoObras] = useState(false);
+  const campoBuscaRef = useRef(null);
+  // Área do resultado da identificação, para rolar até ela quando o Pitaco acha.
+  const resultadoIdRef = useRef(null);
 
   // --- Descobrir ---
   const [descricao, setDescricao] = useState("");
@@ -814,6 +847,81 @@ export default function Pitaco() {
     els.forEach((el) => obs.observe(el));
     return () => obs.disconnect();
   }, [recs, resId, listas, carregando, carregandoId, tendencias, imagem]);
+
+  // Menu encolhe ao descer a página e volta ao tamanho normal ao subir.
+  // Comparamos com a posição anterior a cada quadro; perto do topo fica sempre
+  // normal, e ignoramos micro-movimentos para não ficar piscando.
+  useEffect(() => {
+    let ultimoY = window.scrollY || 0;
+    let raf = 0;
+    function aoRolar() {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const y = window.scrollY || 0;
+        const delta = y - ultimoY;
+        if (Math.abs(delta) > 4) {
+          if (y < 90) setNavCompacta(false);
+          else setNavCompacta(delta > 0);
+          ultimoY = y;
+        }
+      });
+    }
+    window.addEventListener("scroll", aoRolar, { passive: true });
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("scroll", aoRolar);
+    };
+  }, []);
+
+  // Busca por título com um respiro de 350ms depois da digitação, para não
+  // disparar uma chamada por tecla.
+  useEffect(() => {
+    if (!buscaAberta) return;
+    const limpo = termoBusca.trim();
+    if (limpo.length < 2) {
+      setResBusca([]);
+      setBuscandoObras(false);
+      return;
+    }
+    setBuscandoObras(true);
+    let cancelado = false;
+    const t = setTimeout(async () => {
+      const achados = await buscarObras(limpo);
+      if (cancelado) return;
+      setResBusca(achados);
+      setBuscandoObras(false);
+    }, 350);
+    return () => {
+      cancelado = true;
+      clearTimeout(t);
+    };
+  }, [termoBusca, buscaAberta]);
+
+  // Esc fecha a busca; ao abrir, o campo já recebe o cursor.
+  useEffect(() => {
+    if (!buscaAberta) return;
+    function aoTeclar(e) {
+      if (e.key === "Escape") setBuscaAberta(false);
+    }
+    window.addEventListener("keydown", aoTeclar);
+    const t = setTimeout(() => campoBuscaRef.current && campoBuscaRef.current.focus(), 60);
+    return () => {
+      window.removeEventListener("keydown", aoTeclar);
+      clearTimeout(t);
+    };
+  }, [buscaAberta]);
+
+  // Quando o Pitaco identifica o frame, rola até o resultado para a pessoa ver
+  // que a resposta chegou (senão ela fica parada no formulário).
+  useEffect(() => {
+    if (!resId || carregandoId) return;
+    const t = setTimeout(() => {
+      if (resultadoIdRef.current) {
+        resultadoIdRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 120);
+    return () => clearTimeout(t);
+  }, [resId, carregandoId]);
 
   // Lanterna que segue o cursor + parallax da parede
   useEffect(() => {
@@ -1171,28 +1279,119 @@ Regras:
       {/* lanterna que segue o cursor no escuro */}
       <div className="lanterna" aria-hidden="true" />
 
-      {/* menu flutuante de vidro — apenas a marca e o atalho para as listas */}
-      <nav className="navega vidro" aria-label="Navegação">
+      {/* menu flutuante de vidro — marca, busca e atalho para as listas */}
+      <nav
+        className={"navega vidro" + (navCompacta ? " compacta" : "")}
+        aria-label="Navegação"
+      >
         <button className="nav-marca" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
           pitaco<i aria-hidden="true" />
         </button>
-        <button
-          className="nav-listas"
-          onClick={() => irPara("listas")}
-          title="Minhas listas"
-          aria-label={
-            "Minhas listas" + (totalSalvos > 0 ? " (" + totalSalvos + " salvos)" : "")
-          }
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle cx="4.5" cy="6.5" r="1.4" />
-            <circle cx="4.5" cy="12" r="1.4" />
-            <circle cx="4.5" cy="17.5" r="1.4" />
-            <path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" />
-          </svg>
-          {totalSalvos > 0 && <em>{totalSalvos}</em>}
-        </button>
+        <div className="nav-acoes">
+          <button
+            className="nav-botao"
+            onClick={() => setBuscaAberta(true)}
+            title="Pesquisar um título"
+            aria-label="Pesquisar um título"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="10.5" cy="10.5" r="6.5" />
+              <path d="M15.4 15.4 20 20" />
+            </svg>
+          </button>
+          <button
+            className="nav-botao"
+            onClick={() => irPara("listas")}
+            title="Minhas listas"
+            aria-label={
+              "Minhas listas" + (totalSalvos > 0 ? " (" + totalSalvos + " salvos)" : "")
+            }
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="4.5" cy="6.5" r="1.4" className="cheio" />
+              <circle cx="4.5" cy="12" r="1.4" className="cheio" />
+              <circle cx="4.5" cy="17.5" r="1.4" className="cheio" />
+              <path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" />
+            </svg>
+            {totalSalvos > 0 && <em>{totalSalvos}</em>}
+          </button>
+        </div>
       </nav>
+
+      {/* painel de busca por título (abre pela lupa do menu) */}
+      {buscaAberta && (
+        <div
+          className="busca-fundo"
+          onClick={() => setBuscaAberta(false)}
+          role="presentation"
+        >
+          <div
+            className="busca-caixa vidro"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Pesquisar um título"
+          >
+            <div className="busca-topo">
+              <svg className="busca-lupa" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="10.5" cy="10.5" r="6.5" />
+                <path d="M15.4 15.4 20 20" />
+              </svg>
+              <input
+                ref={campoBuscaRef}
+                className="busca-campo"
+                type="text"
+                value={termoBusca}
+                onChange={(e) => setTermoBusca(e.target.value)}
+                placeholder="nome do filme ou série…"
+                aria-label="Nome do filme ou série"
+              />
+              <button
+                className="busca-fechar"
+                onClick={() => setBuscaAberta(false)}
+                aria-label="Fechar busca"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="busca-corpo">
+              {termoBusca.trim().length < 2 ? (
+                <p className="busca-aviso">digite ao menos duas letras para procurar.</p>
+              ) : buscandoObras ? (
+                <p className="busca-aviso">procurando…</p>
+              ) : resBusca.length === 0 ? (
+                <p className="busca-aviso">nada encontrado com esse nome.</p>
+              ) : (
+                <ul className="busca-lista">
+                  {resBusca.map((o, i) => (
+                    <li className="busca-item" key={o.titulo + i}>
+                      <Poster obra={o} url={o.poster} classe="busca-poster" />
+                      <div className="busca-info">
+                        <p className="busca-titulo">{o.titulo}</p>
+                        <p className="busca-meta">
+                          {[o.ano, o.tipo].filter(Boolean).join(" · ")}
+                        </p>
+                        <div className="busca-acoes">
+                          <button
+                            className="busca-usar"
+                            onClick={() => {
+                              setBuscaAberta(false);
+                              usarTendencia(o);
+                            }}
+                          >
+                            pedir parecidos
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ========================= HERÓI ========================= */}
       <header className="heroi">
@@ -1535,7 +1734,7 @@ Regras:
         </div>
 
         {resId && !carregandoId && (
-          <div className="molde resultado-area">
+          <div className="molde resultado-area" ref={resultadoIdRef}>
             {resId.encontrado ? (
               <div className="achado" data-revelar>
                 <span className="achado-carimbo" aria-hidden="true">achei!</span>
@@ -1940,8 +2139,26 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   box-shadow: 0 0 10px var(--vermelho);
   animation: pulsoLuz 2.2s ease-in-out infinite;
 }
-/* Atalho para as listas: só o ícone, com o contador de itens salvos. */
-.nav-listas {
+/* Ao rolar para baixo o menu encolhe; ao subir, volta ao normal. Só medidas
+   mudam, então a transição fica suave e nada "pula" de lugar. */
+.navega.compacta {
+  padding: 5px 6px 5px 14px;
+  width: min(560px, calc(100% - 24px));
+}
+.navega.compacta .nav-marca { font-size: 12px; }
+.navega.compacta .nav-marca i { width: 6px; height: 6px; }
+.navega.compacta .nav-botao { width: 32px; height: 32px; }
+.navega.compacta .nav-botao svg { width: 15px; height: 15px; }
+.navega {
+  transition: padding 0.28s ease, width 0.28s ease;
+}
+.nav-marca, .nav-marca i, .nav-botao, .nav-botao svg {
+  transition: font-size 0.28s ease, width 0.28s ease, height 0.28s ease,
+              background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.nav-acoes { display: inline-flex; align-items: center; gap: 8px; }
+/* Botões de ícone do menu (lupa e listas). */
+.nav-botao {
   position: relative;
   display: inline-flex; align-items: center; justify-content: center;
   width: 42px; height: 42px;
@@ -1950,22 +2167,21 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   border-radius: 999px;
   color: rgba(246,243,236,0.75);
   cursor: pointer;
-  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 /* Ao passar o mouse, fica claro por dentro e o ícone escurece, mantendo o
    contraste sempre legível. */
-.nav-listas:hover {
+.nav-botao:hover {
   background: var(--branco);
   border-color: var(--branco);
   color: var(--preto);
 }
-.nav-listas svg {
+.nav-botao svg {
   width: 19px; height: 19px;
-  fill: currentColor;
+  fill: none;
   stroke: currentColor; stroke-width: 1.7; stroke-linecap: round;
 }
-.nav-listas svg path { fill: none; }
-.nav-listas em {
+.nav-botao svg .cheio { fill: currentColor; stroke: none; }
+.nav-botao em {
   position: absolute; top: -3px; right: -3px;
   font-style: normal; font-family: 'Space Mono', monospace;
   font-size: 9px; line-height: 1;
@@ -1973,6 +2189,94 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   padding: 3px 5px; border-radius: 999px;
   border: 2px solid var(--preto);
 }
+
+/* ===================== BUSCA POR TÍTULO ====================== */
+.busca-fundo {
+  position: fixed; inset: 0; z-index: 120;
+  background: rgba(6,5,4,0.72);
+  backdrop-filter: blur(3px);
+  display: flex; justify-content: center;
+  padding: 84px 16px 24px;
+  animation: surgirFundo 0.2s ease both;
+}
+@keyframes surgirFundo { from { opacity: 0; } to { opacity: 1; } }
+.busca-caixa {
+  width: min(620px, 100%);
+  max-height: 100%;
+  display: flex; flex-direction: column;
+  border-radius: 20px;
+  overflow: hidden;
+  animation: brotarBusca 0.26s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+@keyframes brotarBusca {
+  from { opacity: 0; transform: translateY(-10px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+.busca-topo {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 14px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+.busca-lupa {
+  width: 18px; height: 18px; flex: none;
+  fill: none; stroke: rgba(246,243,236,0.55);
+  stroke-width: 1.7; stroke-linecap: round;
+}
+.busca-campo {
+  flex: 1; min-width: 0;
+  background: none; border: none;
+  color: var(--branco);
+  font-family: 'Archivo', sans-serif; font-size: 16px;
+  padding: 6px 0;
+}
+.busca-campo::placeholder { color: rgba(246,243,236,0.4); }
+.busca-fechar {
+  flex: none;
+  width: 30px; height: 30px;
+  background: none; border: none; cursor: pointer;
+  color: rgba(246,243,236,0.6);
+  font-size: 22px; line-height: 1;
+  border-radius: 999px;
+}
+.busca-fechar:hover { color: var(--branco); background: rgba(255,255,255,0.08); }
+.busca-corpo { overflow-y: auto; padding: 6px 0 10px; }
+.busca-aviso {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.45);
+  padding: 20px 18px; margin: 0;
+}
+.busca-lista { list-style: none; margin: 0; padding: 0; }
+.busca-item {
+  display: grid; grid-template-columns: 56px 1fr;
+  gap: 14px; padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.busca-item:last-child { border-bottom: none; }
+.busca-poster { width: 56px; border-radius: 6px; }
+.busca-info { min-width: 0; display: grid; gap: 4px; align-content: start; }
+.busca-titulo {
+  margin: 0; font-weight: 700; font-size: 16px;
+  color: var(--branco);
+}
+.busca-meta {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+}
+.busca-acoes {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-top: 6px;
+}
+.busca-usar {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--branco);
+  background: var(--vermelho); border: 1px solid var(--vermelho);
+  padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  transition: filter 0.18s ease;
+}
+.busca-usar:hover { filter: brightness(1.12); }
 
 /* ========================== HERÓI ============================ */
 .heroi {
@@ -2583,7 +2887,9 @@ tbody:first-of-type .linha td { border-top: none; }
 }
 
 /* ================= RESULTADO DA IDENTIFICAÇÃO ================ */
-.resultado-area { padding-top: 64px; }
+/* scroll-margin-top: ao rolar automaticamente até o resultado, deixa uma folga
+   para o menu fixo não cobrir o topo da ficha. */
+.resultado-area { padding-top: 64px; scroll-margin-top: 78px; }
 .achado { position: relative; }
 .achado-carimbo {
   position: absolute; top: -18px; right: 4%; z-index: 3;
@@ -2977,8 +3283,13 @@ tbody:first-of-type .linha td { border-top: none; }
 /* ======================== RESPONSIVO ========================= */
 @media (max-width: 760px) {
   .nav-marca { font-size: 12px; }
-  .nav-listas { width: 38px; height: 38px; }
-  .nav-listas svg { width: 17px; height: 17px; }
+  .nav-botao { width: 38px; height: 38px; }
+  .nav-botao svg { width: 17px; height: 17px; }
+  .nav-acoes { gap: 6px; }
+  .busca-fundo { padding: 72px 10px 16px; }
+  .busca-item { grid-template-columns: 48px 1fr; gap: 12px; padding: 11px 13px; }
+  .busca-poster { width: 48px; }
+  .busca-titulo { font-size: 15px; }
   .parede { gap: 10px; padding: 34px 12px 0; }
   .coluna { gap: 10px; max-width: 104px; }
   .col-0, .col-5 { display: none; }
