@@ -645,7 +645,6 @@ function BotaoSalvar({
 // ======================= COMPONENTE RAIZ ========================
 export default function Pitaco() {
   // --- Navegação / página ---
-  const [secaoAtiva, setSecaoAtiva] = useState("descobrir");
 
   // --- Descobrir ---
   const [descricao, setDescricao] = useState("");
@@ -816,24 +815,6 @@ export default function Pitaco() {
     return () => obs.disconnect();
   }, [recs, resId, listas, carregando, carregandoId, tendencias, imagem]);
 
-  // Scrollspy do menu de vidro
-  useEffect(() => {
-    const secs = ["descobrir", "identificar", "listas"]
-      .map((id) => document.getElementById("secao-" + id))
-      .filter(Boolean);
-    if (!secs.length) return;
-    const obs = new IntersectionObserver(
-      (entradas) => {
-        entradas.forEach((en) => {
-          if (en.isIntersecting) setSecaoAtiva(en.target.dataset.sec);
-        });
-      },
-      { rootMargin: "-40% 0px -55% 0px" }
-    );
-    secs.forEach((s) => obs.observe(s));
-    return () => obs.disconnect();
-  }, []);
-
   // Lanterna que segue o cursor + parallax da parede
   useEffect(() => {
     let rafLuz = 0;
@@ -868,45 +849,7 @@ export default function Pitaco() {
     const alvo = document.getElementById("secao-" + id);
     if (alvo) alvo.scrollIntoView({ behavior: "smooth", block: "start" });
   }
-  const idxSecao = { descobrir: 0, identificar: 1, listas: 2 }[secaoAtiva] ?? 0;
   const totalSalvos = listas.reduce((soma, l) => soma + l.itens.length, 0);
-
-  // Alinhamento do indicador da navbar: em vez de calcular 1/3 (que sofria
-  // arredondamento e ficava "torto"), medimos a posição REAL do item ativo no
-  // DOM e posicionamos o indicador exatamente sobre ele. Recalcula ao trocar de
-  // aba, ao redimensionar a tela e quando as fontes terminam de carregar (o que
-  // muda a largura dos rótulos).
-  const navLinksRef = useRef(null);
-  const navItensRef = useRef({});
-  const [indicadorEstilo, setIndicadorEstilo] = useState({ opacity: 0 });
-
-  useEffect(() => {
-    function medir() {
-      const container = navLinksRef.current;
-      const alvo = navItensRef.current[secaoAtiva];
-      if (!container || !alvo) return;
-      const cr = container.getBoundingClientRect();
-      const ar = alvo.getBoundingClientRect();
-      setIndicadorEstilo({
-        width: ar.width + "px",
-        transform: "translateX(" + (ar.left - cr.left) + "px)",
-        opacity: 1,
-      });
-    }
-    medir();
-    // Uma segunda medição no próximo frame garante o alinhamento certo já na
-    // primeira pintura (quando o layout às vezes ainda não assentou).
-    const raf = requestAnimationFrame(medir);
-    window.addEventListener("resize", medir);
-    // Refaz a medição quando as fontes carregam (mudam a largura dos textos).
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(medir).catch(() => {});
-    }
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", medir);
-    };
-  }, [secaoAtiva, totalSalvos]);
 
   function usarTendencia(obra) {
     setDescricao("algo no clima de " + obra.titulo);
@@ -1228,33 +1171,27 @@ Regras:
       {/* lanterna que segue o cursor no escuro */}
       <div className="lanterna" aria-hidden="true" />
 
-      {/* menu flutuante de vidro */}
-      <nav className="navega vidro" aria-label="Seções">
+      {/* menu flutuante de vidro — apenas a marca e o atalho para as listas */}
+      <nav className="navega vidro" aria-label="Navegação">
         <button className="nav-marca" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
           pitaco<i aria-hidden="true" />
         </button>
-        <div className="nav-links" ref={navLinksRef}>
-          <span
-            className="nav-indicador"
-            style={indicadorEstilo}
-            aria-hidden="true"
-          />
-          {[
-            ["descobrir", "descobrir"],
-            ["identificar", "identificar"],
-            ["listas", "listas"],
-          ].map(([id, rotulo]) => (
-            <button
-              key={id}
-              ref={(el) => (navItensRef.current[id] = el)}
-              className={"nav-item" + (secaoAtiva === id ? " ativo" : "")}
-              onClick={() => irPara(id)}
-            >
-              {rotulo}
-              {id === "listas" && totalSalvos > 0 && <em>{totalSalvos}</em>}
-            </button>
-          ))}
-        </div>
+        <button
+          className="nav-listas"
+          onClick={() => irPara("listas")}
+          title="Minhas listas"
+          aria-label={
+            "Minhas listas" + (totalSalvos > 0 ? " (" + totalSalvos + " salvos)" : "")
+          }
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="4.5" cy="6.5" r="1.4" />
+            <circle cx="4.5" cy="12" r="1.4" />
+            <circle cx="4.5" cy="17.5" r="1.4" />
+            <path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" />
+          </svg>
+          {totalSalvos > 0 && <em>{totalSalvos}</em>}
+        </button>
       </nav>
 
       {/* ========================= HERÓI ========================= */}
@@ -1458,9 +1395,10 @@ Regras:
                           {(r.generos || []).slice(0, 2).join(" · ") || "—"}
                         </td>
                       </tr>
-                      <tr className={"linha-detalhe" + (linhaAberta === i ? " aberta" : "")}>
+                      {linhaAberta === i && (
+                      <tr className="linha-detalhe">
                         <td colSpan={5}>
-                          <div className={"ficha" + (linhaAberta === i ? " aberta" : "")}>
+                          <div className="ficha">
                             <div className="ficha-grade">
                               <Poster obra={r} url={posters[chaveObra(r)]} classe="ficha-poster" />
                               <div className="ficha-texto">
@@ -1483,6 +1421,7 @@ Regras:
                           </div>
                         </td>
                       </tr>
+                      )}
                     </tbody>
                   ))}
                 </table>
@@ -2001,46 +1940,38 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   box-shadow: 0 0 10px var(--vermelho);
   animation: pulsoLuz 2.2s ease-in-out infinite;
 }
-.nav-links {
+/* Atalho para as listas: só o ícone, com o contador de itens salvos. */
+.nav-listas {
   position: relative;
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-/* O indicador é posicionado por medição real do item ativo (ver efeito no JS):
-   left/width vêm de getBoundingClientRect, então fica sempre perfeitamente
-   alinhado, sem o "torto" do cálculo por 1/3. Anima transform e largura juntos. */
-.nav-indicador {
-  position: absolute; top: 4px; bottom: 4px; left: 0;
-  background: var(--branco);
-  border: 1px solid rgba(255,255,255,0.9);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.16);
   border-radius: 999px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.4), 0 2px 10px rgba(0,0,0,0.25);
-  transition: transform 0.5s cubic-bezier(0.3, 1.3, 0.35, 1),
-              width 0.5s cubic-bezier(0.3, 1.3, 0.35, 1),
-              opacity 0.2s ease;
-  pointer-events: none;
-  will-change: transform, width;
+  color: rgba(246,243,236,0.75);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
-.nav-item {
-  position: relative; z-index: 1;
-  font-family: 'Space Mono', monospace;
-  font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase;
-  color: rgba(246,243,236,0.6);
-  padding: 13px 18px;
-  background: none; border: none; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  white-space: nowrap;
-  transition: color 0.2s ease;
+/* Ao passar o mouse, fica claro por dentro e o ícone escurece, mantendo o
+   contraste sempre legível. */
+.nav-listas:hover {
+  background: var(--branco);
+  border-color: var(--branco);
+  color: var(--preto);
 }
-/* Ao passar o mouse, o texto fica claro (contraste com o fundo escuro da barra). */
-.nav-item:hover { color: var(--branco); }
-/* O item ativo está sob o indicador BRANCO, então o texto precisa ficar ESCURO
-   para manter contraste e legibilidade. Isso vence o :hover porque vem depois. */
-.nav-item.ativo { color: var(--preto); }
-.nav-item.ativo:hover { color: var(--preto); }
-.nav-item em {
-  font-style: normal; font-size: 9px;
+.nav-listas svg {
+  width: 19px; height: 19px;
+  fill: currentColor;
+  stroke: currentColor; stroke-width: 1.7; stroke-linecap: round;
+}
+.nav-listas svg path { fill: none; }
+.nav-listas em {
+  position: absolute; top: -3px; right: -3px;
+  font-style: normal; font-family: 'Space Mono', monospace;
+  font-size: 9px; line-height: 1;
   background: var(--vermelho); color: #fff;
-  padding: 1px 6px; border-radius: 999px;
+  padding: 3px 5px; border-radius: 999px;
+  border: 2px solid var(--preto);
 }
 
 /* ========================== HERÓI ============================ */
@@ -2488,21 +2419,18 @@ tbody:first-of-type .linha td { border-top: none; }
   white-space: nowrap;
 }
 .linha-detalhe td { padding: 0; border: none; }
-/* A linha aberta sobe no empilhamento para o menu "salvar em lista" ficar acima
-   das linhas seguintes da tabela. position:relative cria o contexto necessário. */
-.linha-detalhe { position: relative; z-index: 0; }
-.linha-detalhe.aberta { z-index: 60; }
+/* A ficha só existe no DOM quando a linha está aberta (ver JSX), então nada de
+   max-height/overflow: a altura é a do conteúdo real, sem sobra nem vão fantasma.
+   O empilhamento fica NESTA div (e não no <tr>): position:relative em linha de
+   tabela tem comportamento indefinido e no Safari do iPhone impedia o recolher,
+   criando o espaço em branco entre as sugestões. */
 .ficha {
-  max-height: 0; overflow: hidden;
-  transition: max-height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+  position: relative; z-index: 60;
+  animation: abrirFicha 0.42s cubic-bezier(0.2, 0.9, 0.25, 1) both;
 }
-/* Quando aberta, liberamos o overflow (com um pequeno atraso, só depois da
-   animação de expandir) para que o popover de salvar possa transbordar a ficha
-   sem ser cortado. Ao fechar, o overflow volta a hidden imediatamente. */
-.ficha.aberta {
-  max-height: 460px;
-  overflow: visible;
-  transition: max-height 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), overflow 0s linear 0.5s;
+@keyframes abrirFicha {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
 }
 .ficha-grade {
   display: grid; grid-template-columns: 120px 1fr;
@@ -3049,7 +2977,8 @@ tbody:first-of-type .linha td { border-top: none; }
 /* ======================== RESPONSIVO ========================= */
 @media (max-width: 760px) {
   .nav-marca { font-size: 12px; }
-  .nav-item { font-size: 11px; padding: 11px 10px; }
+  .nav-listas { width: 38px; height: 38px; }
+  .nav-listas svg { width: 17px; height: 17px; }
   .parede { gap: 10px; padding: 34px 12px 0; }
   .coluna { gap: 10px; max-width: 104px; }
   .col-0, .col-5 { display: none; }
@@ -3062,13 +2991,9 @@ tbody:first-of-type .linha td { border-top: none; }
   .td-titulo { font-size: 18px; }
   .ficha-grade { grid-template-columns: 92px 1fr; padding: 6px 14px 22px; gap: 14px; }
   .ficha-poster { width: 92px; }
-  /* max-height justo ao conteúdo real no mobile (pôster + textos), sem sobrar o
-     vão grande em branco que aparecia antes ao abrir uma sugestão. */
-  .ficha.aberta { max-height: 420px; }
-  /* No mobile, o menu "salvar em lista" precisa transbordar por cima das próximas
-     sugestões. Elevamos ainda mais o empilhamento da linha aberta e do menu, e
-     encostamos o menu à esquerda para não vazar pela borda direita da tela. */
-  .linha-detalhe.aberta { z-index: 200; }
+  /* No mobile o menu "salvar em lista" precisa transbordar por cima das próximas
+     sugestões, e encostar à esquerda para não vazar pela borda da tela. */
+  .ficha { z-index: 200; }
   .menu-salvar {
     right: auto; left: 0;
     width: min(240px, calc(100vw - 40px));
