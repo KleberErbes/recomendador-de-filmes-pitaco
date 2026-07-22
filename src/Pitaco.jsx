@@ -2133,6 +2133,7 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   gap: 8px;
   padding: 10px 10px 10px 20px;
   border-radius: 999px;
+  transition: padding 0.28s ease, width 0.28s ease;
 }
 .nav-marca {
   font-family: 'Archivo Black', sans-serif;
@@ -2148,19 +2149,18 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   box-shadow: 0 0 10px var(--vermelho);
   animation: pulsoLuz 2.2s ease-in-out infinite;
 }
-/* Ao rolar para baixo o menu encolhe; ao subir, volta ao normal. Só medidas
-   mudam, então a transição fica suave e nada "pula" de lugar. */
+/* Ao rolar para baixo o menu encolhe — fica mais baixo E mais estreito; ao subir,
+   volta ao normal. A largura compacta usa porcentagem da tela (e não
+   calc(100% - 24px), que no celular travava na largura cheia e não encolhia
+   nada). O piso de conteúdo é ~175px, então sobra folga até em telas de 320px. */
 .navega.compacta {
   padding: 5px 6px 5px 14px;
-  width: min(560px, calc(100% - 24px));
+  width: min(400px, 78%);
 }
 .navega.compacta .nav-marca { font-size: 12px; }
 .navega.compacta .nav-marca i { width: 6px; height: 6px; }
 .navega.compacta .nav-botao { width: 32px; height: 32px; }
 .navega.compacta .nav-botao svg { width: 15px; height: 15px; }
-.navega {
-  transition: padding 0.28s ease, width 0.28s ease;
-}
 .nav-marca, .nav-marca i, .nav-botao, .nav-botao svg {
   transition: font-size 0.28s ease, width 0.28s ease, height 0.28s ease,
               background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
