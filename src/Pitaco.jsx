@@ -240,6 +240,9 @@ async function buscarObras(termo) {
         titulo: r.title || r.name,
         ano: parseInt((r.release_date || r.first_air_date || "").slice(0, 4), 10) || null,
         tipo: r.media_type === "movie" ? "filme" : "série",
+        // A sinopse do TMDB é guardada junto ao salvar na lista, para a ficha do
+        // item salvo já vir preenchida.
+        sinopse: r.overview || "",
         poster: r.poster_path ? "https://image.tmdb.org/t/p/w342" + r.poster_path : null,
       }));
   } catch (e) {
@@ -609,14 +612,20 @@ function MedidorConfianca({ nivel }) {
   );
 }
 
-// Popover "salvar em" (vidro)
+// Popover "salvar em" (vidro).
+// variante="inline": em vez de flutuar sobre o conteúdo, o menu entra no fluxo
+// normal e empurra o que vem abaixo. É o que usamos dentro do painel de busca,
+// que tem rolagem própria e cortaria um menu flutuante.
 function BotaoSalvar({
   obra, listas, aberto, salvo,
   onAbrir, onFechar, onAlternar, onCriar,
-  nomeNova, setNomeNova,
+  nomeNova, setNomeNova, variante,
 }) {
   return (
-    <div className="salvar-wrap" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={"salvar-wrap" + (variante === "inline" ? " inline" : "")}
+      onClick={(e) => e.stopPropagation()}
+    >
       <button
         className={"botao-salvar" + (salvo ? " salvo" : "")}
         onClick={() => (aberto ? onFechar() : onAbrir())}
@@ -1382,6 +1391,7 @@ Regras:
                           >
                             pedir parecidos
                           </button>
+                          <BotaoSalvar {...propsSalvar("busca-" + i, o)} variante="inline" />
                         </div>
                       </div>
                     </li>
@@ -1971,8 +1981,7 @@ Regras:
                               )}
                               {!item.sinopse && !item.porque && (
                                 <p className="ficha-sinopse ficha-sem-info">
-                                  Este título foi salvo antes de guardarmos a sinopse. Novos
-                                  títulos já vêm com a ficha completa.
+                                  Sem sinopse guardada para este título.
                                 </p>
                               )}
                             </div>
@@ -2277,6 +2286,17 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   transition: filter 0.18s ease;
 }
 .busca-usar:hover { filter: brightness(1.12); }
+/* Variante em fluxo do menu "salvar em": ocupa a largura do item e empurra o
+   conteúdo abaixo, em vez de flutuar — assim a rolagem do painel de busca não
+   corta o menu, que era o motivo de ele não caber aqui. */
+.salvar-wrap.inline { display: block; width: 100%; }
+.salvar-wrap.inline .menu-salvar {
+  position: static;
+  width: 100%;
+  margin-top: 10px;
+  box-shadow: none;
+  border: 1px solid rgba(255,255,255,0.14);
+}
 
 /* ========================== HERÓI ============================ */
 .heroi {
