@@ -731,6 +731,8 @@ export default function Pitaco() {
   const [erroConta, setErroConta] = useState("");
   const [avisoConta, setAvisoConta] = useState("");
   const [ocupadoConta, setOcupadoConta] = useState(false);
+  // Explica POR QUE a conta está sendo pedida (ex.: ao tentar salvar um filme).
+  const [motivoConta, setMotivoConta] = useState("");
   const [sincronizando, setSincronizando] = useState(false);
   const usuario = sessao && sessao.user ? sessao.user : null;
 
@@ -813,10 +815,22 @@ export default function Pitaco() {
     if (!sessaoPronta) return;
     let ativo = true;
     (async () => {
+      // Listas trancadas (há conta disponível, mas ninguém entrou): não lemos
+      // nem marcamos como prontas. Isso é de propósito — deixar "prontas" com
+      // a lista vazia faria o efeito de salvar gravar [] por cima do que já
+      // existe no aparelho, apagando o que seria juntado no primeiro login.
+      if (contaLigada && !usuario) {
+        if (!ativo) return;
+        setListas([]);
+        setListasProntas(false);
+        return;
+      }
+
       const locais = await carregarListasSalvas();
       const listasLocais = Array.isArray(locais) ? locais : [];
 
       if (!usuario) {
+        // Supabase não configurado: funciona como sempre foi, só no aparelho.
         if (!ativo) return;
         setListas(listasLocais);
         setListasProntas(true);
@@ -1061,8 +1075,27 @@ export default function Pitaco() {
   }, []);
 
   // ------------------------- CONTA -----------------------------
+  // As listas são o único recurso que exige conta. Descobrir, identificar e
+  // buscar seguem livres para qualquer visitante.
+  // Se o Supabase não estiver configurado, nada é bloqueado — senão um deploy
+  // sem as variáveis deixaria as listas inacessíveis sem explicação.
+  const listasLiberadas = !contaLigada || Boolean(usuario);
+
+  // Chame antes de qualquer ação de lista. Devolve true quando a ação deve
+  // PARAR (porque abrimos o convite para criar conta).
+  function precisaDeConta(motivo) {
+    if (listasLiberadas) return false;
+    setMotivoConta(motivo || "Crie uma conta para guardar seus filmes.");
+    setModoConta("criar");
+    setErroConta("");
+    setAvisoConta("");
+    setContaAberta(true);
+    return true;
+  }
+
   function abrirConta(modo) {
     setModoConta(modo || "entrar");
+    setMotivoConta("");
     setErroConta("");
     setAvisoConta("");
     setContaAberta(true);
@@ -1417,7 +1450,11 @@ Regras:
       listas,
       aberto: menuSalvar === chaveCard,
       salvo: obraSalva(obra),
-      onAbrir: () => { setMenuSalvar(chaveCard); setNomeListaMenu(""); },
+      onAbrir: () => {
+        if (precisaDeConta("Crie uma conta para guardar este título numa lista.")) return;
+        setMenuSalvar(chaveCard);
+        setNomeListaMenu("");
+      },
       onFechar: () => { setMenuSalvar(null); setNomeListaMenu(""); },
       onAlternar: (listaId) => alternarNaLista(listaId, obra),
       onCriar: () => {
@@ -1589,7 +1626,8 @@ Regras:
         </div>
       )}
 
-      {/* painel da conta: entrar, criar conta ou ver quem está logado */}
+      {/* painel da conta: entrar / criar conta, ou ver quem já está dentro.
+          Abre sozinho quando alguém tenta usar as listas sem estar logado. */}
       {contaAberta && (
         <div className="busca-fundo" onClick={() => setContaAberta(false)} role="presentation">
           <div
@@ -1640,11 +1678,15 @@ Regras:
                   </button>
                 </div>
 
-                <p className="conta-texto">
-                  {modoConta === "criar"
-                    ? "Crie uma conta para suas listas te acompanharem em qualquer aparelho."
-                    : "Entre para reencontrar suas listas salvas."}
-                </p>
+                {motivoConta ? (
+                  <p className="conta-motivo">{motivoConta}</p>
+                ) : (
+                  <p className="conta-texto">
+                    {modoConta === "criar"
+                      ? "Crie uma conta para suas listas te acompanharem em qualquer aparelho."
+                      : "Entre para reencontrar suas listas salvas."}
+                  </p>
+                )}
 
                 <label className="conta-campo">
                   <span>e-mail</span>
@@ -2122,12 +2164,41 @@ Regras:
             <span className="secao-num">03</span>
             <h2 className="secao-titulo">Suas listas</h2>
             <p className="secao-desc">
-              {totalSalvos === 0
+              {!listasLiberadas
+                ? "Prateleiras do seu jeito — crie uma conta para começar."
+                : totalSalvos === 0
                 ? "Prateleiras do seu jeito — comece criando uma."
                 : "Prateleiras do seu jeito — " + totalSalvos + " títulos guardados."}
             </p>
           </header>
 
+          {!listasLiberadas ? (
+            <div className="convite-conta vidro" data-revelar>
+              <p className="convite-titulo">Guarde o que você descobriu</p>
+              <p className="convite-texto">
+                As listas ficam salvas na sua conta, então acompanham você em
+                qualquer aparelho. Descobrir e identificar continuam livres, sem
+                precisar entrar.
+              </p>
+              <div className="convite-acoes">
+                <button
+                  className="botao-cheio"
+                  onClick={() => {
+                    setMotivoConta("");
+                    setModoConta("criar");
+                    setErroConta("");
+                    setAvisoConta("");
+                    setContaAberta(true);
+                  }}
+                >
+                  criar minha conta
+                </button>
+                <button className="botao-vidro" onClick={() => abrirConta("entrar")}>
+                  já tenho conta
+                </button>
+              </div>
+            </div>
+          ) : (
           <div className="console vidro nova-lista" data-revelar>
             <input
               className="entrada-lista"
@@ -2150,8 +2221,9 @@ Regras:
               criar lista
             </button>
           </div>
+          )}
 
-          {listas.length === 0 ? (
+          {!listasLiberadas ? null : listas.length === 0 ? (
             <div className="arquivo-vazio" data-revelar>
               <p className="av-num" aria-hidden="true">000</p>
               <p className="av-texto">
@@ -2491,6 +2563,36 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   background: var(--vermelho); color: #fff;
   padding: 3px 5px; border-radius: 999px;
   border: 2px solid var(--preto);
+}
+
+/* Mensagem que explica por que a conta está sendo pedida naquele momento. */
+.conta-motivo {
+  margin: 0; font-size: 14px; line-height: 1.55;
+  color: var(--luz);
+  background: rgba(240,146,30,0.12);
+  border: 1px solid rgba(240,146,30,0.3);
+  border-left: 3px solid var(--ambar);
+  padding: 12px 14px; border-radius: 12px;
+}
+
+/* Convite que ocupa o lugar da criação de listas para quem não entrou. */
+.convite-conta {
+  padding: 26px 24px;
+  border-radius: 18px;
+  display: grid; gap: 10px;
+  max-width: 560px;
+}
+.convite-titulo {
+  margin: 0; font-family: 'Archivo Black', sans-serif;
+  font-size: clamp(20px, 3vw, 26px);
+  letter-spacing: -0.01em; color: var(--branco);
+}
+.convite-texto {
+  margin: 0; font-size: 14px; line-height: 1.6;
+  color: rgba(246,243,236,0.62);
+}
+.convite-acoes {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px;
 }
 
 /* ======================== CONTA ============================== */
