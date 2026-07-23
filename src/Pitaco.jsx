@@ -862,18 +862,56 @@ export default function Pitaco() {
     return () => { ativo = false; };
   }, [sessaoPronta, usuario && usuario.id]);
 
+  // Guardam o valor mais recente para os "flush" de saída poderem usá-lo sem
+  // precisar recriar os listeners a cada mudança de lista.
+  const listasRef = useRef(listas);
+  const usuarioIdRef = useRef(null);
+  listasRef.current = listas;
+  usuarioIdRef.current = usuario ? usuario.id : null;
+  const envioPendenteRef = useRef(false);
+
   // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
   // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
-  // gravação a cada clique.
+  // gravação a cada clique — mas se a pessoa fechar a aba ou trocar de app
+  // antes desse meio segundo passar, o envio agendado nunca chega a rodar, e
+  // aquela mudança nunca vai para a nuvem (efeito: "salvei no computador e não
+  // apareceu no celular"). Por isso, além do atraso normal, também forçamos o
+  // envio imediato assim que a aba fica oculta ou a página é fechada.
   useEffect(() => {
     if (!listasProntas) return;
     salvarListasNoStorage(listas);
     if (!usuario) return;
+    envioPendenteRef.current = true;
     const t = setTimeout(() => {
-      salvarListasNaNuvem(usuario.id, listas).catch(() => {});
+      salvarListasNaNuvem(usuario.id, listas)
+        .catch(() => {})
+        .finally(() => { envioPendenteRef.current = false; });
     }, 600);
     return () => clearTimeout(t);
   }, [listas, listasProntas, usuario && usuario.id]);
+
+  // Rede de segurança: dispara o envio na hora, sem esperar o atraso, quando a
+  // aba é minimizada, perde o foco ou está prestes a fechar.
+  useEffect(() => {
+    function forcarEnvio() {
+      if (!envioPendenteRef.current) return;
+      const uid = usuarioIdRef.current;
+      if (!uid) return;
+      salvarListasNaNuvem(uid, listasRef.current).catch(() => {});
+      envioPendenteRef.current = false;
+    }
+    function aoMudarVisibilidade() {
+      if (document.visibilityState === "hidden") forcarEnvio();
+    }
+    document.addEventListener("visibilitychange", aoMudarVisibilidade);
+    window.addEventListener("pagehide", forcarEnvio);
+    window.addEventListener("beforeunload", forcarEnvio);
+    return () => {
+      document.removeEventListener("visibilitychange", aoMudarVisibilidade);
+      window.removeEventListener("pagehide", forcarEnvio);
+      window.removeEventListener("beforeunload", forcarEnvio);
+    };
+  }, []);
 
   // Tendências para acender a parede
   useEffect(() => {
