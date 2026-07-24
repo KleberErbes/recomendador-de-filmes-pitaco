@@ -814,6 +814,14 @@ export default function Pitaco() {
   // Marca que "listas" acabou de vir da nuvem, para o efeito de salvar não
   // regravar na hora o mesmo conteúdo (evita o eco leitura → escrita).
   const vindoDaNuvemRef = useRef(false);
+  // Sempre com o valor mais recente, para os envios/flush usarem sem depender
+  // do fechamento (closure) de um render antigo.
+  const listasRef = useRef(listas);
+  const usuarioIdRef = useRef(null);
+  listasRef.current = listas;
+  usuarioIdRef.current = usuario ? usuario.id : null;
+  // Verdadeiro enquanto há uma gravação na nuvem agendada e ainda não concluída.
+  const envioPendenteRef = useRef(false);
 
   // Traz as listas da nuvem para este aparelho. "primeiraVez" só é verdadeiro
   // logo após o login: nesse momento juntamos com o que estava salvo localmente
@@ -887,14 +895,29 @@ export default function Pitaco() {
   }, [sessaoPronta, usuario && usuario.id]);
 
   // Relê a nuvem sempre que o aparelho volta a ficar ativo (você troca de aba,
-  // desbloqueia o celular, volta ao app). É isto que faltava: sem reler, cada
-  // aparelho ficava preso à cópia que carregou no login e sobrescrevia o outro.
+  // desbloqueia o celular, volta ao app). Sem reler, cada aparelho ficava preso
+  // à cópia que carregou no login e sobrescrevia o outro.
+  //
+  // Ordem importa: se há uma gravação pendente (ex.: você acabou de apagar uma
+  // lista e o envio de 600ms ainda não rodou), ENVIAMOS ela primeiro e só depois
+  // relemos. Senão a releitura traria a versão antiga da nuvem de volta e
+  // desfaria a exclusão — foi exatamente o "apaguei e voltou" que aconteceu.
   useEffect(() => {
     if (!usuario) return;
-    function aoVoltar() {
-      if (document.visibilityState === "visible") {
-        sincronizarComNuvem(usuario.id, false);
+    async function aoVoltar() {
+      if (document.visibilityState !== "visible") return;
+      if (envioPendenteRef.current) {
+        try {
+          await salvarListasNaNuvem(usuario.id, listasRef.current);
+          envioPendenteRef.current = false;
+        } catch (e) {
+          // Se a gravação pendente falhar, NÃO relemos: reler agora apagaria da
+          // tela a mudança que ainda não conseguimos salvar.
+          setFalhaNuvem(String(e.message || e));
+          return;
+        }
       }
+      sincronizarComNuvem(usuario.id, false);
     }
     document.addEventListener("visibilitychange", aoVoltar);
     window.addEventListener("focus", aoVoltar);
@@ -903,14 +926,6 @@ export default function Pitaco() {
       window.removeEventListener("focus", aoVoltar);
     };
   }, [usuario && usuario.id]);
-
-  // Guardam o valor mais recente para os "flush" de saída poderem usá-lo sem
-  // precisar recriar os listeners a cada mudança de lista.
-  const listasRef = useRef(listas);
-  const usuarioIdRef = useRef(null);
-  listasRef.current = listas;
-  usuarioIdRef.current = usuario ? usuario.id : null;
-  const envioPendenteRef = useRef(false);
 
   // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
   // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
