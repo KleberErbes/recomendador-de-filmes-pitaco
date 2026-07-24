@@ -734,6 +734,9 @@ export default function Pitaco() {
   // Explica POR QUE a conta está sendo pedida (ex.: ao tentar salvar um filme).
   const [motivoConta, setMotivoConta] = useState("");
   const [sincronizando, setSincronizando] = useState(false);
+  // Guarda o motivo quando a nuvem falha, para avisarmos na tela em vez de
+  // deixar a pessoa achando que a sincronização "simplesmente não funciona".
+  const [falhaNuvem, setFalhaNuvem] = useState("");
   const usuario = sessao && sessao.user ? sessao.user : null;
 
   // --- Descobrir ---
@@ -808,17 +811,59 @@ export default function Pitaco() {
     return () => { ativo = false; cancelar(); };
   }, []);
 
-  // Carrega as listas. Sem conta, lê do aparelho (como sempre foi). Com conta,
-  // lê da nuvem — e, no primeiro login, junta o que já estava salvo aqui para
-  // nada se perder.
+  // Marca que "listas" acabou de vir da nuvem, para o efeito de salvar não
+  // regravar na hora o mesmo conteúdo (evita o eco leitura → escrita).
+  const vindoDaNuvemRef = useRef(false);
+
+  // Traz as listas da nuvem para este aparelho. "primeiraVez" só é verdadeiro
+  // logo após o login: nesse momento juntamos com o que estava salvo localmente
+  // (para o primeiro login não perder nada). Depois disso, a NUVEM é a fonte da
+  // verdade — relemos e substituímos, senão um aparelho com dados antigos em
+  // memória acabaria regravando por cima e apagando o que o outro salvou.
+  async function sincronizarComNuvem(uid, primeiraVez) {
+    if (!uid) return;
+    setSincronizando(true);
+    try {
+      const daNuvem = await carregarListasDaNuvem(uid);
+      if (primeiraVez) {
+        const locais = await carregarListasSalvas();
+        const listasLocais = Array.isArray(locais) ? locais : [];
+        const juntas = listasLocais.length ? juntarListas(daNuvem, listasLocais) : daNuvem;
+        setListas(juntas);
+        setListasProntas(true);
+        setFalhaNuvem("");
+        if (listasLocais.length) {
+          await salvarListasNaNuvem(uid, juntas);
+        }
+      } else {
+        // Releitura: adota a versão da nuvem como está.
+        vindoDaNuvemRef.current = true;
+        setListas(daNuvem);
+        setListasProntas(true);
+        setFalhaNuvem("");
+      }
+    } catch (e) {
+      setFalhaNuvem(String(e.message || e));
+      console.error("[Pitaco] Falha ao sincronizar com a nuvem:", e);
+      // Numa releitura que falhou, não mexemos no que já está na tela.
+      if (primeiraVez) {
+        const locais = await carregarListasSalvas();
+        setListas(Array.isArray(locais) ? locais : []);
+        setListasProntas(true);
+      }
+    } finally {
+      setSincronizando(false);
+    }
+  }
+
+  // Carrega as listas ao abrir e ao entrar/sair da conta.
   useEffect(() => {
     if (!sessaoPronta) return;
     let ativo = true;
     (async () => {
       // Listas trancadas (há conta disponível, mas ninguém entrou): não lemos
-      // nem marcamos como prontas. Isso é de propósito — deixar "prontas" com
-      // a lista vazia faria o efeito de salvar gravar [] por cima do que já
-      // existe no aparelho, apagando o que seria juntado no primeiro login.
+      // nem marcamos como prontas. Deixar "prontas" com a lista vazia faria o
+      // efeito de salvar gravar [] por cima do que já existe no aparelho.
       if (contaLigada && !usuario) {
         if (!ativo) return;
         setListas([]);
@@ -826,41 +871,38 @@ export default function Pitaco() {
         return;
       }
 
-      const locais = await carregarListasSalvas();
-      const listasLocais = Array.isArray(locais) ? locais : [];
-
       if (!usuario) {
         // Supabase não configurado: funciona como sempre foi, só no aparelho.
+        const locais = await carregarListasSalvas();
         if (!ativo) return;
-        setListas(listasLocais);
+        setListas(Array.isArray(locais) ? locais : []);
         setListasProntas(true);
         return;
       }
 
-      setSincronizando(true);
-      try {
-        const daNuvem = await carregarListasDaNuvem(usuario.id);
-        const juntas = listasLocais.length ? juntarListas(daNuvem, listasLocais) : daNuvem;
-        if (!ativo) return;
-        setListas(juntas);
-        setListasProntas(true);
-        // Se a junção acrescentou algo, devolve para a nuvem já organizada.
-        if (listasLocais.length) {
-          await salvarListasNaNuvem(usuario.id, juntas);
-        }
-      } catch (e) {
-        // Falhou a nuvem (offline, por exemplo): segue com o que há no aparelho
-        // para o app continuar utilizável.
-        if (!ativo) return;
-        setListas(listasLocais);
-        setListasProntas(true);
-        setErroConta(String(e.message || e));
-      } finally {
-        if (ativo) setSincronizando(false);
-      }
+      // Logado: sincroniza com a nuvem (juntando o local nesta primeira carga).
+      await sincronizarComNuvem(usuario.id, true);
     })();
     return () => { ativo = false; };
   }, [sessaoPronta, usuario && usuario.id]);
+
+  // Relê a nuvem sempre que o aparelho volta a ficar ativo (você troca de aba,
+  // desbloqueia o celular, volta ao app). É isto que faltava: sem reler, cada
+  // aparelho ficava preso à cópia que carregou no login e sobrescrevia o outro.
+  useEffect(() => {
+    if (!usuario) return;
+    function aoVoltar() {
+      if (document.visibilityState === "visible") {
+        sincronizarComNuvem(usuario.id, false);
+      }
+    }
+    document.addEventListener("visibilitychange", aoVoltar);
+    window.addEventListener("focus", aoVoltar);
+    return () => {
+      document.removeEventListener("visibilitychange", aoVoltar);
+      window.removeEventListener("focus", aoVoltar);
+    };
+  }, [usuario && usuario.id]);
 
   // Guardam o valor mais recente para os "flush" de saída poderem usá-lo sem
   // precisar recriar os listeners a cada mudança de lista.
@@ -881,10 +923,23 @@ export default function Pitaco() {
     if (!listasProntas) return;
     salvarListasNoStorage(listas);
     if (!usuario) return;
+    // Se estas listas acabaram de ser lidas da nuvem, não reenviamos: salvar
+    // agora só devolveria o mesmo conteúdo e poderia atropelar uma gravação do
+    // outro aparelho.
+    if (vindoDaNuvemRef.current) {
+      vindoDaNuvemRef.current = false;
+      return;
+    }
     envioPendenteRef.current = true;
     const t = setTimeout(() => {
       salvarListasNaNuvem(usuario.id, listas)
-        .catch(() => {})
+        .then(() => setFalhaNuvem(""))
+        .catch((e) => {
+          // Sem esse aviso, a gravação falha calada e a pessoa só descobre no
+          // outro aparelho, quando o filme não está lá.
+          setFalhaNuvem(String(e.message || e));
+          console.error("[Pitaco] Falha ao salvar na nuvem:", e);
+        })
         .finally(() => { envioPendenteRef.current = false; });
     }, 600);
     return () => clearTimeout(t);
@@ -2210,6 +2265,18 @@ Regras:
             </p>
           </header>
 
+          {falhaNuvem && listasLiberadas && (
+            <div className="aviso-nuvem">
+              <p className="aviso-nuvem-titulo">
+                Suas listas não estão sincronizando entre aparelhos
+              </p>
+              <p className="aviso-nuvem-texto">
+                Elas continuam salvas neste aparelho, mas não estão indo para a
+                sua conta. Detalhe técnico: {falhaNuvem}
+              </p>
+            </div>
+          )}
+
           {!listasLiberadas ? (
             <div className="convite-conta vidro" data-revelar>
               <p className="convite-titulo">Guarde o que você descobriu</p>
@@ -2601,6 +2668,28 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   background: var(--vermelho); color: #fff;
   padding: 3px 5px; border-radius: 999px;
   border: 2px solid var(--preto);
+}
+
+/* Aviso quando a nuvem falha — precisa ser visível, senão a pessoa acha que a
+   sincronização simplesmente não existe. */
+.aviso-nuvem {
+  max-width: 620px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+  border-radius: 14px;
+  background: rgba(230,57,43,0.14);
+  border: 1px solid rgba(230,57,43,0.4);
+  border-left: 3px solid var(--vermelho);
+}
+.aviso-nuvem-titulo {
+  margin: 0 0 6px;
+  font-weight: 700; font-size: 15px;
+  color: #ffd7d2;
+}
+.aviso-nuvem-texto {
+  margin: 0; font-size: 13px; line-height: 1.55;
+  color: rgba(255,215,210,0.8);
+  word-break: break-word;
 }
 
 /* Mensagem que explica por que a conta está sendo pedida naquele momento. */
