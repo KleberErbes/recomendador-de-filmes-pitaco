@@ -2630,6 +2630,14 @@ Regras:
                             aria-expanded={estaAberto}
                           >
                             <Poster obra={item} url={posters[chaveObra(item)]} classe="caixa-img" />
+                            {notaDe(item) > 0 && (
+                              <span className="pi-nota" aria-label={"Sua nota: " + notaDe(item) + " de 5"}>
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                  <path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 18.6 6.1 20.5l1.2-6.5L2.5 9.4l6.6-.9z" />
+                                </svg>
+                                {notaDe(item)}
+                              </span>
+                            )}
                             <figcaption>
                               <span className="pi-titulo">{item.titulo}</span>
                               <span className="pi-meta">
@@ -2680,6 +2688,17 @@ Regras:
                                   Sem sinopse guardada para este título.
                                 </p>
                               )}
+                              <div className="ficha-lista-avaliar">
+                                <span className="ficha-lista-avaliar-rotulo">sua nota</span>
+                                <Estrelas
+                                  nota={notaDe(item)}
+                                  liberado={listasLiberadas}
+                                  onAvaliar={(n) => avaliar(item, n)}
+                                  onPrecisaConta={() =>
+                                    precisaDeConta("Crie uma conta para avaliar filmes.")
+                                  }
+                                />
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -4113,6 +4132,28 @@ tbody:first-of-type .linha td { border-top: none; }
 .ficha-lista .ficha-meta { color: var(--luz); }
 .ficha-lista .ficha-sinopse { color: var(--branco); }
 .ficha-lista .ficha-porque { color: rgba(246,243,236,0.75); }
+/* Bloco de avaliar dentro da ficha do item da lista. */
+.ficha-lista-avaliar {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 14px; padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.ficha-lista-avaliar-rotulo {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+}
+/* Selo de nota no canto da miniatura (aparece só quando avaliado). */
+.pi-nota {
+  position: absolute; top: 6px; left: 6px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: 'Space Mono', monospace; font-size: 11px; font-weight: 700;
+  color: #1a1305;
+  background: var(--luz);
+  padding: 3px 7px 3px 5px; border-radius: 999px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+.pi-nota svg { width: 11px; height: 11px; fill: #1a1305; }
 .ficha-sem-info { color: rgba(246,243,236,0.55); font-style: italic; }
 .prat-item figcaption { padding: 8px 3px 2px; display: grid; gap: 2px; }
 .pi-titulo {
