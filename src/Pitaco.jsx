@@ -9,6 +9,8 @@ import {
   recuperarSenha,
   carregarListasDaNuvem,
   salvarListasNaNuvem,
+  carregarAvaliacoesDaNuvem,
+  salvarAvaliacoesNaNuvem,
 } from "./nuvem.js";
 
 /*
@@ -295,7 +297,30 @@ async function prepararImagem(arquivo) {
 //   2) localStorage    → deploy próprio (Vercel etc.)
 //   3) memória         → fallback dentro da sessão
 const CHAVE_LISTAS = "pitaco-listas-v1";
+// Marca, por usuário, que a fusão única do localStorage com a nuvem já foi
+// feita. Sem isso, todo F5 juntaria o localStorage de novo — e como a fusão só
+// sabe ADICIONAR, uma lista apagada em outro aparelho voltava a cada recarga.
+const CHAVE_FUNDIU = "pitaco-fundiu-";
 let listasMemoria = null;
+
+function jaFundiuLocal(uid) {
+  if (!uid) return true;
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage.getItem(CHAVE_FUNDIU + uid) === "1";
+    }
+  } catch (e) {}
+  return false;
+}
+
+function marcarFundiuLocal(uid) {
+  if (!uid) return;
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(CHAVE_FUNDIU + uid, "1");
+    }
+  } catch (e) {}
+}
 
 async function carregarListasSalvas() {
   if (typeof window !== "undefined" && window.storage && typeof window.storage.get === "function") {
@@ -649,6 +674,43 @@ function MedidorConfianca({ nivel }) {
 // variante="inline": em vez de flutuar sobre o conteúdo, o menu entra no fluxo
 // normal e empurra o que vem abaixo. É o que usamos dentro do painel de busca,
 // que tem rolagem própria e cortaria um menu flutuante.
+// Estrelas de avaliação (1 a 5). "nota" é a nota atual (0 = sem avaliar).
+// Clicar numa estrela define a nota; clicar na mesma estrela de novo limpa.
+// Sem conta, o clique dispara "onPrecisaConta" em vez de avaliar.
+function Estrelas({ nota, onAvaliar, onPrecisaConta, liberado }) {
+  const [hover, setHover] = useState(0);
+  const ativo = hover || nota;
+  return (
+    <div
+      className="estrelas"
+      role="radiogroup"
+      aria-label="Avaliar de 1 a 5 estrelas"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          className={"estrela" + (n <= ativo ? " cheia" : "")}
+          aria-label={n + (n === 1 ? " estrela" : " estrelas")}
+          aria-checked={n === nota}
+          role="radio"
+          onMouseEnter={() => setHover(n)}
+          onMouseLeave={() => setHover(0)}
+          onClick={() => {
+            if (!liberado) { onPrecisaConta && onPrecisaConta(); return; }
+            onAvaliar(n === nota ? 0 : n);
+          }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 18.6 6.1 20.5l1.2-6.5L2.5 9.4l6.6-.9z" />
+          </svg>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function BotaoSalvar({
   obra, listas, aberto, salvo,
   onAbrir, onFechar, onAlternar, onCriar,
@@ -768,6 +830,9 @@ export default function Pitaco() {
   // --- Listas ---
   const [listas, setListas] = useState([]);
   const [listasProntas, setListasProntas] = useState(false);
+  // Avaliações do usuário: [{ chave, titulo, ano, tipo, nota, quando }]. A chave
+  // (titulo|ano) identifica o filme de forma estável entre sessões.
+  const [avaliacoes, setAvaliacoes] = useState([]);
   const [nomeNovaLista, setNomeNovaLista] = useState("");
   const [confirmaApagar, setConfirmaApagar] = useState(null);
   const [compartilhando, setCompartilhando] = useState(null);      // id da lista gerando PNG
@@ -820,20 +885,29 @@ export default function Pitaco() {
   const usuarioIdRef = useRef(null);
   listasRef.current = listas;
   usuarioIdRef.current = usuario ? usuario.id : null;
+  const avaliacoesRef = useRef(avaliacoes);
+  avaliacoesRef.current = avaliacoes;
   // Verdadeiro enquanto há uma gravação na nuvem agendada e ainda não concluída.
   const envioPendenteRef = useRef(false);
+  // Marca que "avaliacoes" acabou de vir da nuvem (evita regravar na hora).
+  const avaliacoesDaNuvemRef = useRef(false);
 
-  // Traz as listas da nuvem para este aparelho. "primeiraVez" só é verdadeiro
-  // logo após o login: nesse momento juntamos com o que estava salvo localmente
-  // (para o primeiro login não perder nada). Depois disso, a NUVEM é a fonte da
-  // verdade — relemos e substituímos, senão um aparelho com dados antigos em
-  // memória acabaria regravando por cima e apagando o que o outro salvou.
-  async function sincronizarComNuvem(uid, primeiraVez) {
+  // Traz as listas da nuvem para este aparelho.
+  //
+  // A fusão com o localStorage só acontece UMA VEZ na vida da conta, no primeiro
+  // login (para não perder o que existia antes de ter conta). Depois disso —
+  // inclusive a cada F5 — a NUVEM é a única fonte da verdade. Isso é o que
+  // conserta o "apaguei e voltou": antes, todo recarregamento refazia a fusão, e
+  // como fundir só sabe ADICIONAR, o localStorage de um aparelho ressuscitava
+  // listas apagadas em outro.
+  async function sincronizarComNuvem(uid, aberturaDaSessao) {
     if (!uid) return;
     setSincronizando(true);
     try {
       const daNuvem = await carregarListasDaNuvem(uid);
-      if (primeiraVez) {
+      const precisaFundir = aberturaDaSessao && !jaFundiuLocal(uid);
+
+      if (precisaFundir) {
         const locais = await carregarListasSalvas();
         const listasLocais = Array.isArray(locais) ? locais : [];
         const juntas = listasLocais.length ? juntarListas(daNuvem, listasLocais) : daNuvem;
@@ -843,18 +917,30 @@ export default function Pitaco() {
         if (listasLocais.length) {
           await salvarListasNaNuvem(uid, juntas);
         }
+        marcarFundiuLocal(uid); // não funde de novo nas próximas cargas
       } else {
-        // Releitura: adota a versão da nuvem como está.
+        // Fonte da verdade: a nuvem, como está.
         vindoDaNuvemRef.current = true;
         setListas(daNuvem);
         setListasProntas(true);
         setFalhaNuvem("");
       }
+
+      // Avaliações: a nuvem é sempre a fonte da verdade (cada filme tem uma nota
+      // só, então não há o problema de "ressuscitar" que as listas tinham).
+      try {
+        const avalsNuvem = await carregarAvaliacoesDaNuvem(uid);
+        avaliacoesDaNuvemRef.current = true;
+        setAvaliacoes(Array.isArray(avalsNuvem) ? avalsNuvem : []);
+      } catch (e) {
+        console.error("[Pitaco] Falha ao ler avaliações:", e);
+      }
     } catch (e) {
       setFalhaNuvem(String(e.message || e));
       console.error("[Pitaco] Falha ao sincronizar com a nuvem:", e);
-      // Numa releitura que falhou, não mexemos no que já está na tela.
-      if (primeiraVez) {
+      // Se falhou logo na abertura e ainda não tínhamos nada em tela, mostramos
+      // o que houver no aparelho para o app não abrir vazio.
+      if (aberturaDaSessao && !listasProntas) {
         const locais = await carregarListasSalvas();
         setListas(Array.isArray(locais) ? locais : []);
         setListasProntas(true);
@@ -959,6 +1045,24 @@ export default function Pitaco() {
     }, 600);
     return () => clearTimeout(t);
   }, [listas, listasProntas, usuario && usuario.id]);
+
+  // Salva as avaliações na nuvem (mesmo padrão das listas: atraso de 600ms para
+  // não gravar a cada estrela clicada).
+  useEffect(() => {
+    if (!usuario) return;
+    // Acabou de vir da nuvem: não reenvia.
+    if (avaliacoesDaNuvemRef.current) {
+      avaliacoesDaNuvemRef.current = false;
+      return;
+    }
+    avaliacoesRef.current = avaliacoes;
+    const t = setTimeout(() => {
+      salvarAvaliacoesNaNuvem(usuario.id, avaliacoes).catch((e) => {
+        console.error("[Pitaco] Falha ao salvar avaliações:", e);
+      });
+    }, 600);
+    return () => clearTimeout(t);
+  }, [avaliacoes, usuario && usuario.id]);
 
   // Rede de segurança: dispara o envio na hora, sem esperar o atraso, quando a
   // aba é minimizada, perde o foco ou está prestes a fechar.
@@ -1357,7 +1461,62 @@ Responda SOMENTE com JSON válido, sem markdown, sem crase, sem nenhum texto ant
     }
   }
 
-  // ------------------------ IDENTIFICAR ------------------------
+  // Recomenda com base nas SUAS avaliações. Monta o prompt com o que você gostou
+  // (4-5 estrelas) e o que não gostou (1-2), para o Gemini calibrar o gosto.
+  async function recomendarPeloGosto() {
+    if (avaliacoes.length === 0) {
+      setErro("Avalie alguns filmes com as estrelas primeiro — aí eu recomendo no seu gosto.");
+      return;
+    }
+    setErro("");
+    setErroDetalhe("");
+    setCarregando(true);
+    setRecs([]);
+    setJaSugeridos([]);
+    setLinhaAberta(null);
+
+    const amou = avaliacoes.filter((a) => a.nota >= 4).map((a) => a.titulo);
+    const gostou = avaliacoes.filter((a) => a.nota === 3).map((a) => a.titulo);
+    const naoGostou = avaliacoes.filter((a) => a.nota <= 2).map((a) => a.titulo);
+
+    const linhas = [];
+    if (amou.length) linhas.push(`Amou (nota alta): ${amou.join(", ")}.`);
+    if (gostou.length) linhas.push(`Achou ok: ${gostou.join(", ")}.`);
+    if (naoGostou.length) linhas.push(`Não gostou: ${naoGostou.join(", ")}.`);
+    const jaAvaliados = avaliacoes.map((a) => a.titulo).join(", ");
+
+    const prompt = `Você é um curador de cinema e séries para uma pessoa no Brasil.
+Use as avaliações dela para entender o gosto e recomendar coisas novas parecidas com o que ela amou e diferentes do que ela não gostou.
+
+${linhas.join("\n")}
+
+NÃO recomende nada que ela já avaliou: ${jaAvaliados}.
+Dê exatamente 4 recomendações variadas. Use o título conhecido no Brasil. Seja conciso: "sinopse" e "porque" com no máximo 15 palavras cada. No "porque", conecte com o gosto dela (ex.: "por gostar de X").
+
+Responda SOMENTE com JSON válido, sem markdown, exatamente neste formato:
+{"recomendacoes":[{"titulo":"...","ano":2014,"tipo":"filme ou série","generos":["...","..."],"sinopse":"frase curta","porque":"conexão com o gosto"}]}`;
+
+    try {
+      const texto = await chamarIA(prompt, true, "recomendacoes");
+      let parsed;
+      try {
+        parsed = extrairJson(texto);
+      } catch (eParse) {
+        throw new Error("Formato inesperado: " + texto.slice(0, 140));
+      }
+      const novas = Array.isArray(parsed.recomendacoes) ? parsed.recomendacoes : [];
+      if (novas.length === 0) throw new Error("Lista de recomendações veio vazia");
+      setRecs(novas);
+      setJaSugeridos(novas.map((r) => r.titulo));
+      setUltimoPedido("");
+    } catch (e) {
+      console.error(e);
+      setErro("Não consegui montar as sugestões agora. Tente de novo em alguns segundos.");
+      setErroDetalhe(String(e && e.message ? e.message : e).slice(0, 300));
+    } finally {
+      setCarregando(false);
+    }
+  }
   async function receberArquivo(arquivo) {
     if (!arquivo) return;
     if (!arquivo.type || !arquivo.type.startsWith("image/")) {
@@ -1478,6 +1637,33 @@ Regras:
   function apagarLista(listaId) {
     setListas((prev) => prev.filter((l) => l.id !== listaId));
     setConfirmaApagar(null);
+  }
+
+  // Nota atual de um filme (0 = não avaliado).
+  function notaDe(obra) {
+    const c = chaveObra(obra);
+    const a = avaliacoes.find((x) => x.chave === c);
+    return a ? a.nota : 0;
+  }
+
+  // Define a nota de um filme. nota 0 remove a avaliação.
+  function avaliar(obra, nota) {
+    const c = chaveObra(obra);
+    setAvaliacoes((prev) => {
+      const semEste = prev.filter((x) => x.chave !== c);
+      if (!nota) return semEste;
+      return [
+        ...semEste,
+        {
+          chave: c,
+          titulo: obra.titulo,
+          ano: obra.ano || null,
+          tipo: obra.tipo || "",
+          nota,
+          quando: Date.now(),
+        },
+      ];
+    });
   }
 
   function mostrarAvisoLista(id, msg) {
@@ -1978,6 +2164,20 @@ Regras:
             </div>
           )}
 
+          {avaliacoes.length > 0 && !carregando && (
+            <div className="gosto-faixa" data-revelar>
+              <button className="botao-gosto" onClick={recomendarPeloGosto}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 18.6 6.1 20.5l1.2-6.5L2.5 9.4l6.6-.9z" />
+                </svg>
+                recomendar no meu gosto
+              </button>
+              <span className="gosto-info">
+                com base nos seus {avaliacoes.length} filmes avaliados
+              </span>
+            </div>
+          )}
+
           {erro && (
             <div className="erro">
               <p>{erro}</p>
@@ -2068,7 +2268,17 @@ Regras:
                                 <p className="ficha-porque">
                                   <span>por que combina</span> {r.porque}
                                 </p>
-                                <BotaoSalvar {...propsSalvar("rec-" + i, r)} />
+                                <div className="ficha-acoes">
+                                  <BotaoSalvar {...propsSalvar("rec-" + i, r)} />
+                                  <Estrelas
+                                    nota={notaDe(r)}
+                                    liberado={listasLiberadas}
+                                    onAvaliar={(n) => avaliar(r, n)}
+                                    onPrecisaConta={() =>
+                                      precisaDeConta("Crie uma conta para avaliar filmes e receber recomendações no seu gosto.")
+                                    }
+                                  />
+                                </div>
                               </div>
                             </div>
                           </div>
@@ -2706,6 +2916,53 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
   color: rgba(255,215,210,0.8);
   word-break: break-word;
 }
+
+/* Botão de recomendar pelo gosto (aparece quando há avaliações). */
+.gosto-faixa {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 12px; margin-top: 18px;
+}
+.botao-gosto {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: 'Space Mono', monospace;
+  font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--preto);
+  background: var(--luz);
+  border: 1px solid var(--luz);
+  padding: 11px 18px; border-radius: 999px; cursor: pointer;
+  transition: filter 0.18s ease, transform 0.1s ease;
+}
+.botao-gosto:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.botao-gosto svg { width: 16px; height: 16px; fill: var(--preto); }
+.gosto-info {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.06em;
+  color: rgba(246,243,236,0.5);
+}
+
+/* Linha com o botão de salvar e as estrelas lado a lado. */
+.ficha-acoes {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 14px; margin-top: 4px;
+}
+
+/* Estrelas de avaliação. */
+.estrelas { display: inline-flex; gap: 2px; align-items: center; }
+.estrela {
+  background: none; border: none; padding: 2px; cursor: pointer;
+  line-height: 0;
+}
+.estrela svg {
+  width: 22px; height: 22px;
+  fill: none;
+  stroke: rgba(246,243,236,0.4); stroke-width: 1.4;
+  transition: fill 0.12s ease, stroke 0.12s ease, transform 0.1s ease;
+}
+.estrela:hover svg { transform: scale(1.15); }
+.estrela.cheia svg { fill: var(--luz); stroke: var(--luz); }
+/* Sobre fundo claro (papel), as estrelas vazias precisam de traço mais escuro. */
+.papel .estrela svg { stroke: rgba(23,20,15,0.35); }
+.papel .estrela.cheia svg { fill: #e0a740; stroke: #e0a740; }
 
 /* Mensagem que explica por que a conta está sendo pedida naquele momento. */
 .conta-motivo {

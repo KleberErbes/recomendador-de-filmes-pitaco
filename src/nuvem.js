@@ -13,8 +13,40 @@ import { createClient } from "@supabase/supabase-js";
 // segurança (RLS) do banco autorizam — e lá cada pessoa só alcança a própria
 // linha. Quem protege os dados é o banco, não o segredo da chave.
 const env = (typeof import.meta !== "undefined" && import.meta.env) || {};
-const URL_SUPABASE = env.VITE_SUPABASE_URL || "";
-const CHAVE_SUPABASE = env.VITE_SUPABASE_ANON_KEY || "";
+
+// Aceita a URL do projeto mesmo se vier com barra no fim ou com um caminho
+// colado por engano (ex.: ".../rest/v1"). O Supabase recusa a chamada quando
+// isso acontece, com a mensagem "Invalid path specified in request URL" — então
+// normalizamos aqui para só sobrar "https://SEU-PROJETO.supabase.co".
+function limparUrl(bruta) {
+  const texto = (bruta || "").trim();
+  if (!texto) return "";
+  try {
+    return new URL(texto).origin;
+  } catch (e) {
+    return texto.replace(/\/+$/, "");
+  }
+}
+
+const URL_SUPABASE = limparUrl(env.VITE_SUPABASE_URL);
+const CHAVE_SUPABASE = (env.VITE_SUPABASE_ANON_KEY || "").trim();
+
+// Avisa no console se a configuração parecer trocada — poupa tempo de
+// adivinhação quando algo não funciona.
+if (typeof console !== "undefined") {
+  if (URL_SUPABASE && !/^https:\/\/[^/]+\.supabase\.(co|in)$/.test(URL_SUPABASE)) {
+    console.warn(
+      "[Pitaco] VITE_SUPABASE_URL parece fora do padrão:",
+      URL_SUPABASE,
+      "— o esperado é algo como https://seu-projeto.supabase.co"
+    );
+  }
+  if (CHAVE_SUPABASE.startsWith("sb_secret_")) {
+    console.error(
+      "[Pitaco] Você colocou a SECRET KEY no navegador. Troque pela publishable (sb_publishable_...)."
+    );
+  }
+}
 
 export const contaLigada = Boolean(URL_SUPABASE && CHAVE_SUPABASE);
 
@@ -120,12 +152,45 @@ export async function salvarListasNaNuvem(userId, listas) {
   if (error) throw new Error("Não consegui salvar suas listas: " + error.message);
 }
 
+const TABELA_AVALIACOES = "avaliacoes_usuario";
+
+// Lê as avaliações do usuário. Devolve [] se ele ainda não tem linha no banco.
+export async function carregarAvaliacoesDaNuvem(userId) {
+  if (!supabase || !userId) return [];
+  const { data, error } = await supabase
+    .from(TABELA_AVALIACOES)
+    .select("dados")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error("Não consegui ler suas avaliações: " + error.message);
+  const dados = data && data.dados;
+  return Array.isArray(dados) ? dados : [];
+}
+
+// Grava as avaliações do usuário (cria a linha na primeira vez, atualiza depois).
+export async function salvarAvaliacoesNaNuvem(userId, avaliacoes) {
+  if (!supabase || !userId) return;
+  const { error } = await supabase
+    .from(TABELA_AVALIACOES)
+    .upsert(
+      { user_id: userId, dados: avaliacoes || [] },
+      { onConflict: "user_id" }
+    );
+  if (error) throw new Error("Não consegui salvar suas avaliações: " + error.message);
+}
+
 // ------------------------------- ERROS --------------------------------------
 
 // O Supabase responde em inglês; aqui traduzimos os casos comuns para algo que
 // a pessoa entenda. Mensagens desconhecidas passam como vieram.
 function traduzErro(msg) {
   const m = (msg || "").toLowerCase();
+  if (m.includes("invalid path specified")) {
+    return "A URL do Supabase parece errada. Ela deve ser só https://seu-projeto.supabase.co (sem barra no final e sem caminho depois).";
+  }
+  if (m.includes("invalid api key") || m.includes("invalid jwt")) {
+    return "A chave do Supabase parece errada. Use a publishable (sb_publishable_...).";
+  }
   if (m.includes("invalid login credentials")) return "E-mail ou senha incorretos.";
   if (m.includes("email not confirmed")) {
     return "Confirme seu e-mail antes de entrar — o link está na sua caixa de entrada.";
