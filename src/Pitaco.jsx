@@ -1724,8 +1724,13 @@ Regras:
     try {
       const cs = await carregarCompartilhadas(uid);
       setCompartilhadas(cs);
+      return cs;
     } catch (e) {
+      // Mostra na tela em vez de só no console — senão "não aparece nada" fica
+      // sem explicação.
+      setErroCompart("Não consegui carregar as listas: " + String(e.message || e));
       console.error("[Pitaco] Falha ao carregar colaborativas:", e);
+      return [];
     }
   }
 
@@ -1757,8 +1762,18 @@ Regras:
     setErroCompart("");
     setOcupadoCompart(true);
     try {
-      await entrarPorCodigo(cod);
-      await recarregarColaborativas(usuario.id);
+      const listaId = await entrarPorCodigo(cod);
+      const cs = await recarregarColaborativas(usuario.id);
+      // Confirma que a lista que acabamos de entrar veio na recarga. Se não
+      // veio, a política de leitura não reconheceu a filiação — avisa em vez de
+      // fechar o modal como se tudo tivesse dado certo.
+      const entrou = Array.isArray(cs) && cs.some((l) => l.id === listaId);
+      if (!entrou) {
+        setErroCompart(
+          "Você entrou, mas a lista não carregou. Puxe a tela para atualizar ou recarregue o app."
+        );
+        return;
+      }
       setEntrarAberto(false);
       setCodigoEntrar("");
     } catch (e) {
