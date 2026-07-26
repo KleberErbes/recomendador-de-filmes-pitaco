@@ -848,6 +848,8 @@ export default function Pitaco() {
   const [codigoEntrar, setCodigoEntrar] = useState("");
   const [erroCompart, setErroCompart] = useState("");
   const [ocupadoCompart, setOcupadoCompart] = useState(false);
+  const [linkCopiado, setLinkCopiado] = useState(false);
+  const [codigoCopiado, setCodigoCopiado] = useState(false);
   const [copiado, setCopiado] = useState(false);
   const [nomeNovaLista, setNomeNovaLista] = useState("");
   const [confirmaApagar, setConfirmaApagar] = useState(null);
@@ -2109,9 +2111,11 @@ Regras:
                 className="compart-mini"
                 onClick={() => {
                   try { navigator.clipboard.writeText(painelCompartilhar.codigo); } catch (e) {}
+                  setCodigoCopiado(true);
+                  setTimeout(() => setCodigoCopiado(false), 1800);
                 }}
               >
-                copiar código
+                {codigoCopiado ? "copiado ✓" : "copiar código"}
               </button>
             </div>
 
@@ -2120,12 +2124,11 @@ Regras:
               onClick={() => {
                 const link = linkConvite(painelCompartilhar.codigo);
                 try { navigator.clipboard.writeText(link); } catch (e) {}
-                if (navigator.share) {
-                  navigator.share({ title: "Pitaco", text: "Bora montar essa lista juntos?", url: link }).catch(() => {});
-                }
+                setLinkCopiado(true);
+                setTimeout(() => setLinkCopiado(false), 1800);
               }}
             >
-              copiar link do convite
+              {linkCopiado ? "link copiado ✓" : "copiar link do convite"}
             </button>
           </div>
         </div>
