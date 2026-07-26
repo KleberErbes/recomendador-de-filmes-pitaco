@@ -11,6 +11,13 @@ import {
   salvarListasNaNuvem,
   carregarAvaliacoesDaNuvem,
   salvarAvaliacoesNaNuvem,
+  criarListaCompartilhada,
+  entrarPorCodigo,
+  carregarCompartilhadas,
+  salvarItensCompartilhada,
+  sairDaCompartilhada,
+  apagarCompartilhada,
+  ouvirCompartilhada,
 } from "./nuvem.js";
 
 /*
@@ -833,6 +840,15 @@ export default function Pitaco() {
   // Avaliações do usuário: [{ chave, titulo, ano, tipo, nota, quando }]. A chave
   // (titulo|ano) identifica o filme de forma estável entre sessões.
   const [avaliacoes, setAvaliacoes] = useState([]);
+  // Listas compartilhadas de que o usuário é membro (vêm do banco, não do JSON
+  // pessoal). Cada uma: { id, nome, codigo, dono, itens, ... }.
+  const [compartilhadas, setCompartilhadas] = useState([]);
+  const [painelCompartilhar, setPainelCompartilhar] = useState(null); // lista sendo compartilhada (mostra código/link)
+  const [entrarAberto, setEntrarAberto] = useState(false);
+  const [codigoEntrar, setCodigoEntrar] = useState("");
+  const [erroCompart, setErroCompart] = useState("");
+  const [ocupadoCompart, setOcupadoCompart] = useState(false);
+  const [copiado, setCopiado] = useState(false);
   const [nomeNovaLista, setNomeNovaLista] = useState("");
   const [confirmaApagar, setConfirmaApagar] = useState(null);
   const [compartilhando, setCompartilhando] = useState(null);      // id da lista gerando PNG
@@ -976,6 +992,22 @@ export default function Pitaco() {
 
       // Logado: sincroniza com a nuvem (juntando o local nesta primeira carga).
       await sincronizarComNuvem(usuario.id, true);
+      // Carrega as listas colaborativas e processa link de convite pendente.
+      await recarregarColaborativas(usuario.id);
+      const hash = typeof window !== "undefined" ? window.location.hash : "";
+      const m = /#entrar=([A-Za-z0-9]+)/.exec(hash);
+      if (m) {
+        try {
+          await entrarPorCodigo(m[1]);
+          await recarregarColaborativas(usuario.id);
+        } catch (e) {
+          console.error("[Pitaco] convite:", e);
+        }
+        // Limpa o hash para não re-entrar a cada carga.
+        if (typeof window !== "undefined" && window.history) {
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
+      }
     })();
     return () => { ativo = false; };
   }, [sessaoPronta, usuario && usuario.id]);
@@ -1012,6 +1044,20 @@ export default function Pitaco() {
       window.removeEventListener("focus", aoVoltar);
     };
   }, [usuario && usuario.id]);
+
+  // Tempo real: ouve mudanças em cada lista colaborativa e atualiza a tela na
+  // hora que outro membro edita. Reassina quando o conjunto de listas muda.
+  useEffect(() => {
+    if (!usuario || compartilhadas.length === 0) return;
+    const cancelamentos = compartilhadas.map((l) =>
+      ouvirCompartilhada(l.id, (novosItens) => {
+        setCompartilhadas((prev) =>
+          prev.map((x) => (x.id === l.id ? { ...x, itens: novosItens } : x))
+        );
+      })
+    );
+    return () => cancelamentos.forEach((c) => c && c());
+  }, [usuario && usuario.id, compartilhadas.map((l) => l.id).join(",")]);
 
   // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
   // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
@@ -1666,6 +1712,119 @@ Regras:
     });
   }
 
+  // ---------------- LISTAS COLABORATIVAS (em tempo real) ----------------
+  // Diferente do "compartilhar" acima (que gera um PNG para mandar no zap), aqui
+  // a lista é EDITÁVEL por vários membros ao mesmo tempo, guardada no banco.
+
+  // Carrega as listas colaborativas de que sou membro.
+  async function recarregarColaborativas(uid) {
+    if (!uid) { setCompartilhadas([]); return; }
+    try {
+      const cs = await carregarCompartilhadas(uid);
+      setCompartilhadas(cs);
+    } catch (e) {
+      console.error("[Pitaco] Falha ao carregar colaborativas:", e);
+    }
+  }
+
+  // Cria uma lista colaborativa (opcionalmente a partir de uma pessoal, levando
+  // os itens) e abre o painel com o código/link para convidar.
+  async function criarColaborativa(nome, itensIniciais) {
+    if (precisaDeConta("Crie uma conta para ter listas colaborativas.")) return;
+    setErroCompart("");
+    setOcupadoCompart(true);
+    try {
+      const nova = await criarListaCompartilhada(usuario.id, nome, itensIniciais || []);
+      setCompartilhadas((prev) => [...prev, nova]);
+      setPainelCompartilhar(nova);
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+    } finally {
+      setOcupadoCompart(false);
+    }
+  }
+
+  // Entra numa lista pelo código digitado.
+  async function entrarNaColaborativa() {
+    if (precisaDeConta("Crie uma conta para entrar numa lista colaborativa.")) return;
+    const cod = codigoEntrar.trim();
+    if (cod.length < 4) {
+      setErroCompart("Digite o código que seu amigo te passou.");
+      return;
+    }
+    setErroCompart("");
+    setOcupadoCompart(true);
+    try {
+      await entrarPorCodigo(cod);
+      await recarregarColaborativas(usuario.id);
+      setEntrarAberto(false);
+      setCodigoEntrar("");
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+    } finally {
+      setOcupadoCompart(false);
+    }
+  }
+
+  // Adiciona/remove um filme numa lista colaborativa (grava no banco na hora).
+  async function alternarNaColaborativa(lista, obra) {
+    const existe = (lista.itens || []).some((i) => mesmaObra(i, obra));
+    const novos = existe
+      ? lista.itens.filter((i) => !mesmaObra(i, obra))
+      : [...(lista.itens || []), paraItem(obra)];
+    // Atualiza na tela já (otimista) e persiste.
+    setCompartilhadas((prev) =>
+      prev.map((l) => (l.id === lista.id ? { ...l, itens: novos } : l))
+    );
+    try {
+      await salvarItensCompartilhada(lista.id, novos);
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+      recarregarColaborativas(usuario && usuario.id); // reverte para o estado real
+    }
+  }
+
+  async function removerDaColaborativa(lista, itemId) {
+    const novos = (lista.itens || []).filter((i) => i.id !== itemId);
+    setCompartilhadas((prev) =>
+      prev.map((l) => (l.id === lista.id ? { ...l, itens: novos } : l))
+    );
+    try {
+      await salvarItensCompartilhada(lista.id, novos);
+    } catch (e) {
+      recarregarColaborativas(usuario && usuario.id);
+    }
+  }
+
+  async function sairOuApagarColaborativa(lista) {
+    try {
+      if (usuario && lista.dono === usuario.id) {
+        await apagarCompartilhada(lista.id);
+      } else {
+        await sairDaCompartilhada(lista.id, usuario.id);
+      }
+      setCompartilhadas((prev) => prev.filter((l) => l.id !== lista.id));
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+    }
+  }
+
+  function linkConvite(codigo) {
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    return base + "/#entrar=" + codigo;
+  }
+
+  async function copiarConvite(lista) {
+    const texto = linkConvite(lista.codigo);
+    try {
+      await navigator.clipboard.writeText(texto);
+      setCopiado(true);
+      setTimeout(() => setCopiado(false), 1800);
+    } catch (e) {
+      // sem clipboard: o usuário copia manualmente do campo
+    }
+  }
+
   function mostrarAvisoLista(id, msg) {
     setAvisoCompartilhar({ id, msg });
     setTimeout(
@@ -1916,6 +2075,106 @@ Regras:
                 </ul>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* painel de convite: mostra o código e o link para os amigos entrarem */}
+      {painelCompartilhar && (
+        <div className="busca-fundo" onClick={() => setPainelCompartilhar(null)} role="presentation">
+          <div
+            className="conta-caixa vidro"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Convidar para a lista"
+          >
+            <button
+              className="busca-fechar conta-fechar"
+              onClick={() => setPainelCompartilhar(null)}
+              aria-label="Fechar"
+            >
+              ×
+            </button>
+            <p className="conta-etiqueta">convidar para</p>
+            <p className="conta-email">{painelCompartilhar.nome}</p>
+            <p className="conta-texto">
+              Seus amigos entram com o código abaixo, ou clicando no link. Todos
+              podem adicionar e remover filmes.
+            </p>
+
+            <div className="convite-codigo">
+              <span className="convite-codigo-valor">{painelCompartilhar.codigo}</span>
+              <button
+                className="compart-mini"
+                onClick={() => {
+                  try { navigator.clipboard.writeText(painelCompartilhar.codigo); } catch (e) {}
+                }}
+              >
+                copiar código
+              </button>
+            </div>
+
+            <button
+              className="conta-botao principal"
+              onClick={() => {
+                const link = linkConvite(painelCompartilhar.codigo);
+                try { navigator.clipboard.writeText(link); } catch (e) {}
+                if (navigator.share) {
+                  navigator.share({ title: "Pitaco", text: "Bora montar essa lista juntos?", url: link }).catch(() => {});
+                }
+              }}
+            >
+              copiar link do convite
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* modal de entrar numa lista pelo código */}
+      {entrarAberto && (
+        <div className="busca-fundo" onClick={() => setEntrarAberto(false)} role="presentation">
+          <div
+            className="conta-caixa vidro"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Entrar por código"
+          >
+            <button
+              className="busca-fechar conta-fechar"
+              onClick={() => setEntrarAberto(false)}
+              aria-label="Fechar"
+            >
+              ×
+            </button>
+            <p className="conta-etiqueta">entrar numa lista</p>
+            <p className="conta-texto">Cole o código que seu amigo te passou.</p>
+
+            <label className="conta-campo">
+              <span>código</span>
+              <input
+                type="text"
+                value={codigoEntrar}
+                onChange={(e) => setCodigoEntrar(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !ocupadoCompart) entrarNaColaborativa();
+                }}
+                placeholder="ex.: 7F3K92"
+                maxLength={8}
+                autoFocus
+              />
+            </label>
+
+            {erroCompart && <p className="conta-erro">{erroCompart}</p>}
+
+            <button
+              className="conta-botao principal"
+              onClick={entrarNaColaborativa}
+              disabled={ocupadoCompart}
+            >
+              {ocupadoCompart ? "entrando…" : "entrar na lista"}
+            </button>
           </div>
         </div>
       )}
@@ -2553,6 +2812,98 @@ Regras:
           </div>
           )}
 
+          {listasLiberadas && (
+            <div className="compart-acoes" data-revelar>
+              <button
+                className="botao-vidro compart-btn"
+                onClick={() => criarColaborativa(nomeNovaLista.trim() || "lista com amigos")}
+                disabled={ocupadoCompart}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="9" cy="8" r="3.2" />
+                  <circle cx="17" cy="9.5" r="2.6" />
+                  <path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 15.5a4.5 4.5 0 0 1 6 3.5" />
+                </svg>
+                criar lista compartilhada
+              </button>
+              <button
+                className="botao-vidro compart-btn"
+                onClick={() => {
+                  if (precisaDeConta("Crie uma conta para entrar numa lista compartilhada.")) return;
+                  setErroCompart("");
+                  setCodigoEntrar("");
+                  setEntrarAberto(true);
+                }}
+              >
+                entrar com um código
+              </button>
+            </div>
+          )}
+
+          {erroCompart && !entrarAberto && !painelCompartilhar && (
+            <p className="compart-erro" data-revelar>{erroCompart}</p>
+          )}
+
+          {compartilhadas.length > 0 && (
+            <div className="compart-lista" data-revelar>
+              {compartilhadas.map((l) => (
+                <article className="compart-card" key={l.id}>
+                  <header className="compart-card-topo">
+                    <div>
+                      <span className="compart-tag">
+                        compartilhada{usuario && l.dono === usuario.id ? " · sua" : ""}
+                      </span>
+                      <h3 className="compart-nome">{l.nome}</h3>
+                    </div>
+                    <div className="compart-card-botoes">
+                      <button
+                        className="compart-mini"
+                        onClick={() => setPainelCompartilhar(l)}
+                        title="Convidar (código e link)"
+                      >
+                        convidar
+                      </button>
+                      <button
+                        className="compart-mini perigo"
+                        onClick={() => sairOuApagarColaborativa(l)}
+                        title={usuario && l.dono === usuario.id ? "Apagar a lista" : "Sair da lista"}
+                      >
+                        {usuario && l.dono === usuario.id ? "apagar" : "sair"}
+                      </button>
+                    </div>
+                  </header>
+
+                  {(l.itens || []).length === 0 ? (
+                    <p className="compart-vazia">
+                      lista vazia — salve títulos com o “+ lista” e escolha esta lista.
+                    </p>
+                  ) : (
+                    <div className="compart-grade">
+                      {l.itens.map((item) => (
+                        <figure className="caixa mini acesa compart-item" key={item.id}>
+                          <Poster obra={item} url={posters[chaveObra(item)]} classe="caixa-img" />
+                          <figcaption>
+                            <span className="pi-titulo">{item.titulo}</span>
+                            <span className="pi-meta">
+                              {[item.ano, item.tipo].filter(Boolean).join(" · ")}
+                            </span>
+                          </figcaption>
+                          <button
+                            className="pi-remover"
+                            aria-label={"Remover " + item.titulo}
+                            onClick={() => removerDaColaborativa(l, item.id)}
+                          >
+                            ×
+                          </button>
+                        </figure>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+
           {!listasLiberadas ? null : listas.length === 0 ? (
             <div className="arquivo-vazio" data-revelar>
               <p className="av-num" aria-hidden="true">000</p>
@@ -3011,6 +3362,79 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 }
 .convite-acoes {
   display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px;
+}
+
+/* ==================== LISTAS COMPARTILHADAS ================== */
+.compart-acoes {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px;
+}
+.compart-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.compart-btn svg {
+  width: 17px; height: 17px;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.compart-erro {
+  margin: 12px 0 0; font-size: 13px;
+  color: #ffd7d2;
+  background: rgba(230,57,43,0.14);
+  border: 1px solid rgba(230,57,43,0.4);
+  padding: 10px 12px; border-radius: 12px; max-width: 560px;
+}
+.compart-lista { display: grid; gap: 18px; margin-top: 24px; }
+.compart-card {
+  padding: 18px 20px; border-radius: 16px;
+  background: linear-gradient(150deg, rgba(240,146,30,0.08), rgba(24,19,15,0.4));
+  border: 1px solid rgba(240,146,30,0.25);
+}
+.compart-card-topo {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px;
+}
+.compart-tag {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--luz);
+}
+.compart-nome {
+  margin: 4px 0 0; font-family: 'Archivo Black', sans-serif;
+  font-size: clamp(20px, 3vw, 28px); color: var(--branco);
+}
+.compart-card-botoes { display: flex; gap: 8px; flex: none; }
+.compart-mini {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.8);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.2);
+  padding: 8px 12px; border-radius: 999px; cursor: pointer;
+  transition: background 0.18s ease;
+}
+.compart-mini:hover { background: rgba(255,255,255,0.14); }
+.compart-mini.perigo { color: #ffb9b2; border-color: rgba(230,57,43,0.4); }
+.compart-mini.perigo:hover { background: rgba(230,57,43,0.18); }
+.compart-vazia {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.06em;
+  color: rgba(246,243,236,0.45);
+}
+.compart-grade { display: flex; flex-wrap: wrap; gap: 16px; }
+.compart-item { position: relative; width: 110px; }
+
+/* Painel de convite: código em destaque. */
+.convite-codigo {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 4px 0 4px;
+  padding: 12px 14px; border-radius: 12px;
+  background: rgba(0,0,0,0.3);
+  border: 1px dashed rgba(240,146,30,0.5);
+}
+.convite-codigo-valor {
+  font-family: 'Space Mono', monospace;
+  font-size: 26px; letter-spacing: 0.2em; font-weight: 700;
+  color: var(--luz);
 }
 
 /* ======================== CONTA ============================== */
