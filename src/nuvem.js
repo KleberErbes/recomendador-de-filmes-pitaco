@@ -198,34 +198,51 @@ export async function criarListaCompartilhada(userId, nome, itensIniciais) {
   if (!supabase || !userId) throw new Error("Conta indisponível.");
 
   let ultimaFalha = null;
-  // Tenta algumas vezes caso o código sorteado já exista.
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     const codigo = gerarCodigo();
-    const { data, error } = await supabase
-      .from("listas_compartilhadas")
-      .insert({
-        nome: (nome || "lista compartilhada").trim(),
-        codigo,
-        dono: userId,
-        itens: itensIniciais || [],
-      })
-      .select()
-      .single();
+    // Geramos o id no cliente para saber qual linha é sem depender de .select()
+    // (que exigiria ler antes de ser membro). Fallback caso randomUUID falte.
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : "l-" + Date.now() + "-" + Math.random().toString(16).slice(2);
 
-    if (!error) {
-      // Entra o dono como membro (para as políticas de leitura/edição valerem).
-      const { error: erroMembro } = await supabase
-        .from("membros_lista")
-        .insert({ lista_id: data.id, user_id: userId });
-      if (erroMembro && !String(erroMembro.message).includes("duplicate")) {
-        throw new Error("Não consegui te adicionar à lista: " + erroMembro.message);
-      }
-      return data;
+    const novaLista = {
+      id,
+      nome: (nome || "lista compartilhada").trim(),
+      codigo,
+      dono: userId,
+      itens: itensIniciais || [],
+    };
+
+    const { error } = await supabase
+      .from("listas_compartilhadas")
+      .insert(novaLista);
+
+    if (error) {
+      // Código repetido: tenta outro. Qualquer outro erro é reportado.
+      if (error.code === "23505") { ultimaFalha = error; continue; }
+      throw new Error("Não consegui criar a lista: " + error.message);
     }
 
-    // 23505 = violação de unicidade (código repetido) → tenta outro.
-    if (error.code === "23505") { ultimaFalha = error; continue; }
-    throw new Error("Não consegui criar a lista: " + error.message);
+    // Vira membro — a partir daqui a leitura/edição é permitida.
+    const { error: erroMembro } = await supabase
+      .from("membros_lista")
+      .insert({ lista_id: id, user_id: userId });
+    if (erroMembro && error.code !== "23505" && !String(erroMembro.message || "").includes("duplicate")) {
+      throw new Error("Lista criada, mas não consegui te adicionar como membro: " + erroMembro.message);
+    }
+
+    // Devolve o registro (relê se der; senão usa o que montamos).
+    try {
+      const { data: lida } = await supabase
+        .from("listas_compartilhadas")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+      if (lida) return lida;
+    } catch (e) { /* usa o objeto local abaixo */ }
+    return novaLista;
   }
   throw new Error("Não consegui gerar um código único: " + (ultimaFalha?.message || ""));
 }
