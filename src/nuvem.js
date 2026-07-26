@@ -179,6 +179,138 @@ export async function salvarAvaliacoesNaNuvem(userId, avaliacoes) {
   if (error) throw new Error("Não consegui salvar suas avaliações: " + error.message);
 }
 
+// ---------------------- LISTAS COMPARTILHADAS -------------------------------
+
+// Gera um código curto e legível para convite (sem caracteres ambíguos como
+// 0/O, 1/I). 6 caracteres dão ~1 bilhão de combinações — colisão é improvável,
+// mas mesmo assim tentamos de novo se o banco recusar por duplicidade.
+function gerarCodigo() {
+  const alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let c = "";
+  for (let i = 0; i < 6; i++) {
+    c += alfabeto[Math.floor(Math.random() * alfabeto.length)];
+  }
+  return c;
+}
+
+// Cria uma lista compartilhada e já entra o dono como membro. Devolve a lista.
+export async function criarListaCompartilhada(userId, nome, itensIniciais) {
+  if (!supabase || !userId) throw new Error("Conta indisponível.");
+
+  let ultimaFalha = null;
+  // Tenta algumas vezes caso o código sorteado já exista.
+  for (let tentativa = 0; tentativa < 5; tentativa++) {
+    const codigo = gerarCodigo();
+    const { data, error } = await supabase
+      .from("listas_compartilhadas")
+      .insert({
+        nome: (nome || "lista compartilhada").trim(),
+        codigo,
+        dono: userId,
+        itens: itensIniciais || [],
+      })
+      .select()
+      .single();
+
+    if (!error) {
+      // Entra o dono como membro (para as políticas de leitura/edição valerem).
+      const { error: erroMembro } = await supabase
+        .from("membros_lista")
+        .insert({ lista_id: data.id, user_id: userId });
+      if (erroMembro && !String(erroMembro.message).includes("duplicate")) {
+        throw new Error("Não consegui te adicionar à lista: " + erroMembro.message);
+      }
+      return data;
+    }
+
+    // 23505 = violação de unicidade (código repetido) → tenta outro.
+    if (error.code === "23505") { ultimaFalha = error; continue; }
+    throw new Error("Não consegui criar a lista: " + error.message);
+  }
+  throw new Error("Não consegui gerar um código único: " + (ultimaFalha?.message || ""));
+}
+
+// Entra numa lista pelo código (chama a função do banco que valida e adiciona).
+// Devolve o id da lista.
+export async function entrarPorCodigo(codigo) {
+  if (!supabase) throw new Error("Conta indisponível.");
+  const { data, error } = await supabase.rpc("entrar_por_codigo", {
+    p_codigo: (codigo || "").trim(),
+  });
+  if (error) {
+    const m = (error.message || "").toLowerCase();
+    if (m.includes("não encontrado") || m.includes("nao encontrado")) {
+      throw new Error("Código não encontrado. Confira e tente de novo.");
+    }
+    throw new Error(error.message);
+  }
+  return data; // id da lista
+}
+
+// Lista todas as listas compartilhadas das quais o usuário é membro.
+export async function carregarCompartilhadas(userId) {
+  if (!supabase || !userId) return [];
+  // Graças às políticas, o select já devolve só as listas de que sou membro.
+  const { data, error } = await supabase
+    .from("listas_compartilhadas")
+    .select("*")
+    .order("criado_em", { ascending: true });
+  if (error) throw new Error("Não consegui carregar as listas compartilhadas: " + error.message);
+  return data || [];
+}
+
+// Salva os itens de uma lista compartilhada.
+export async function salvarItensCompartilhada(listaId, itens) {
+  if (!supabase || !listaId) return;
+  const { error } = await supabase
+    .from("listas_compartilhadas")
+    .update({ itens: itens || [] })
+    .eq("id", listaId);
+  if (error) throw new Error("Não consegui salvar a lista: " + error.message);
+}
+
+// Sai de uma lista (remove a própria filiação).
+export async function sairDaCompartilhada(listaId, userId) {
+  if (!supabase || !listaId || !userId) return;
+  const { error } = await supabase
+    .from("membros_lista")
+    .delete()
+    .eq("lista_id", listaId)
+    .eq("user_id", userId);
+  if (error) throw new Error("Não consegui sair da lista: " + error.message);
+}
+
+// Apaga a lista inteira (só o dono consegue, por política).
+export async function apagarCompartilhada(listaId) {
+  if (!supabase || !listaId) return;
+  const { error } = await supabase
+    .from("listas_compartilhadas")
+    .delete()
+    .eq("id", listaId);
+  if (error) throw new Error("Não consegui apagar a lista: " + error.message);
+}
+
+// Assina mudanças ao vivo numa lista compartilhada (Realtime). Chama "onMudou"
+// com os novos itens sempre que alguém edita. Devolve uma função para cancelar.
+export function ouvirCompartilhada(listaId, onMudou) {
+  if (!supabase || !listaId) return () => {};
+  const canal = supabase
+    .channel("lista-" + listaId)
+    .on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "listas_compartilhadas", filter: "id=eq." + listaId },
+      (payload) => {
+        if (payload.new && Array.isArray(payload.new.itens)) {
+          onMudou(payload.new.itens);
+        }
+      }
+    )
+    .subscribe();
+  return () => {
+    try { supabase.removeChannel(canal); } catch (e) {}
+  };
+}
+
 // ------------------------------- ERROS --------------------------------------
 
 // O Supabase responde em inglês; aqui traduzimos os casos comuns para algo que
