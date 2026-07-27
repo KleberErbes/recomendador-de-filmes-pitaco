@@ -722,7 +722,9 @@ function BotaoSalvar({
   obra, listas, aberto, salvo,
   onAbrir, onFechar, onAlternar, onCriar,
   nomeNova, setNomeNova, variante,
+  compartilhadas, usuarioId, onAlternarCompart,
 }) {
+  const compart = compartilhadas || [];
   return (
     <div
       className={"salvar-wrap" + (variante === "inline" ? " inline" : "")}
@@ -740,7 +742,7 @@ function BotaoSalvar({
         <div className="menu-salvar vidro">
           <p className="menu-titulo">salvar em</p>
 
-          {listas.length === 0 && (
+          {listas.length === 0 && compart.length === 0 && (
             <p className="menu-vazio">Você ainda não tem listas — crie a primeira abaixo.</p>
           )}
 
@@ -758,6 +760,26 @@ function BotaoSalvar({
               </button>
             );
           })}
+
+          {compart.length > 0 && (
+            <>
+              <p className="menu-subtitulo">compartilhadas</p>
+              {compart.map((l) => {
+                const dentro = (l.itens || []).some((i) => mesmaObra(i, obra));
+                return (
+                  <button
+                    key={l.id}
+                    className={"menu-lista compart" + (dentro ? " dentro" : "")}
+                    onClick={() => onAlternarCompart(l)}
+                  >
+                    <span className="menu-check">{dentro ? "✓" : ""}</span>
+                    <span className="menu-nome">{l.nome}</span>
+                    <span className="menu-qtd">{(l.itens || []).length}</span>
+                  </button>
+                );
+              })}
+            </>
+          )}
 
           <div className="menu-nova">
             <input
@@ -1038,6 +1060,7 @@ export default function Pitaco() {
         }
       }
       sincronizarComNuvem(usuario.id, false);
+      recarregarColaborativas(usuario.id);
     }
     document.addEventListener("visibilitychange", aoVoltar);
     window.addEventListener("focus", aoVoltar);
@@ -1060,6 +1083,20 @@ export default function Pitaco() {
     );
     return () => cancelamentos.forEach((c) => c && c());
   }, [usuario && usuario.id, compartilhadas.map((l) => l.id).join(",")]);
+
+  // Rede de segurança para o tempo real: mesmo que o Realtime não entregue um
+  // evento (rede instável, aba dormindo), recarrega as compartilhadas a cada 8s
+  // enquanto houver alguma. É leve (uma consulta pequena) e garante que a lista
+  // do amigo apareça em poucos segundos mesmo sem o push ao vivo.
+  useEffect(() => {
+    if (!usuario || compartilhadas.length === 0) return;
+    const intervalo = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        recarregarColaborativas(usuario.id);
+      }
+    }, 8000);
+    return () => clearInterval(intervalo);
+  }, [usuario && usuario.id, compartilhadas.length]);
 
   // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
   // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
@@ -1918,6 +1955,8 @@ Regras:
     return {
       obra,
       listas,
+      compartilhadas,
+      usuarioId: usuario ? usuario.id : null,
       aberto: menuSalvar === chaveCard,
       salvo: obraSalva(obra),
       onAbrir: () => {
@@ -1927,6 +1966,7 @@ Regras:
       },
       onFechar: () => { setMenuSalvar(null); setNomeListaMenu(""); },
       onAlternar: (listaId) => alternarNaLista(listaId, obra),
+      onAlternarCompart: (lista) => alternarNaColaborativa(lista, obra),
       onCriar: () => {
         const id = criarLista(nomeListaMenu, obra);
         if (id) setNomeListaMenu("");
@@ -4416,6 +4456,15 @@ tbody:first-of-type .linha td { border-top: none; }
   font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
   color: var(--vermelho); margin: 0 0 8px;
 }
+.menu-subtitulo {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ambar);
+  margin: 10px 0 4px; padding-top: 8px;
+  border-top: 1px dashed rgba(255,255,255,0.14);
+}
+.menu-lista.compart .menu-nome { color: var(--luz); }
+.menu-lista.compart .menu-check { color: var(--ambar); }
 .menu-vazio { font-size: 12.5px; color: rgba(246,243,236,0.6); margin: 0 0 8px; line-height: 1.4; }
 .menu-lista {
   display: flex; width: 100%; align-items: center; gap: 8px;
