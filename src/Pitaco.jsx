@@ -395,6 +395,40 @@ function mesmaObra(a, b) {
   );
 }
 
+// Valida o FORMATO do e-mail (não garante que exista de verdade — isso só a
+// confirmação por e-mail do Supabase garante). Rejeita os erros comuns: sem @,
+// sem domínio, sem ponto no domínio, espaços, dois @, começo/fim inválidos.
+function emailValido(email) {
+  const e = (email || "").trim();
+  if (!e || e.length > 254) return false;
+  if (/\s/.test(e)) return false;
+  // exatamente um @, parte local não vazia, domínio com ao menos um ponto e
+  // extensão de 2+ letras (ex.: .com, .com.br).
+  return /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(e) && !e.includes("..");
+}
+
+// Domínios de e-mail com erro de digitação comum → sugere a correção.
+const DOMINIOS_COMUNS = {
+  "gmail.co": "gmail.com",
+  "gmail.con": "gmail.com",
+  "gmail.cm": "gmail.com",
+  "gmial.com": "gmail.com",
+  "gmai.com": "gmail.com",
+  "hotmail.co": "hotmail.com",
+  "hotmail.con": "hotmail.com",
+  "outlook.co": "outlook.com",
+  "yahoo.co": "yahoo.com",
+  "icloud.co": "icloud.com",
+};
+function sugestaoEmail(email) {
+  const e = (email || "").trim().toLowerCase();
+  const at = e.lastIndexOf("@");
+  if (at === -1) return null;
+  const dominio = e.slice(at + 1);
+  const certo = DOMINIOS_COMUNS[dominio];
+  return certo ? e.slice(0, at + 1) + certo : null;
+}
+
 // ============== COMPARTILHAR LISTA COMO PNG ==================
 // Desenha a watchlist inteira num canvas com a identidade do Pitaco
 // (fundo escuro, marca, nome gigante, grade de pôsteres) e devolve um
@@ -1406,6 +1440,15 @@ export default function Pitaco() {
 
     if (!email || !senha) {
       setErroConta("Preencha e-mail e senha.");
+      return;
+    }
+    if (!emailValido(email)) {
+      const sugestao = sugestaoEmail(email);
+      setErroConta(
+        sugestao
+          ? "Esse e-mail parece ter um erro. Você quis dizer " + sugestao + "?"
+          : "Digite um e-mail válido, como voce@email.com."
+      );
       return;
     }
     if (modoConta === "criar" && senha.length < 6) {
