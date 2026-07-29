@@ -199,13 +199,40 @@ function gerarCodigo() {
 export async function criarListaCompartilhada(userId, nome, opcoes) {
   if (!supabase || !userId) throw new Error("Conta indisponível.");
   const op = opcoes || {};
+  const limpo = (nome || "").trim().slice(0, 80);
+  if (!limpo) throw new Error("Dê um nome para a lista.");
 
+  // Caminho rápido: uma única chamada que cria a lista, entra o dono como
+  // membro e devolve a linha pronta — tudo na mesma transação.
+  const { data, error } = await supabase.rpc("criar_lista_compartilhada", {
+    p_nome: limpo,
+    p_somente_dono_edita: Boolean(op.somenteDonoEdita),
+    p_itens: Array.isArray(op.itens) ? op.itens : [],
+  });
+
+  if (!error && data) {
+    // O Supabase devolve objeto ou array de um item, dependendo da versão.
+    return Array.isArray(data) ? data[0] : data;
+  }
+
+  // Se a função ainda não existe no banco (SQL v3 não rodado), cai no caminho
+  // antigo em vez de simplesmente falhar.
+  const semFuncao =
+    error &&
+    (error.code === "PGRST202" ||
+      /could not find the function|does not exist/i.test(error.message || ""));
+  if (!semFuncao) {
+    throw new Error("Não consegui criar a lista: " + (error?.message || "erro desconhecido"));
+  }
+  return await criarListaModoAntigo(userId, limpo, op);
+}
+
+// Caminho antigo (três etapas). Fica como reserva para quem ainda não rodou o
+// SQL v3 — assim o app não quebra durante a atualização.
+async function criarListaModoAntigo(userId, nome, op) {
   let ultimaFalha = null;
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     const codigo = gerarCodigo();
-    // Geramos o id aqui para não precisar de .select() logo após o insert (o
-    // select exigiria ler a linha, mas a leitura só é liberada depois que
-    // viramos membro — o que acontece no passo seguinte).
     const id =
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
@@ -213,7 +240,7 @@ export async function criarListaCompartilhada(userId, nome, opcoes) {
 
     const novaLista = {
       id,
-      nome: (nome || "lista compartilhada").trim().slice(0, 80),
+      nome,
       codigo,
       dono: userId,
       itens: Array.isArray(op.itens) ? op.itens : [],
@@ -221,9 +248,8 @@ export async function criarListaCompartilhada(userId, nome, opcoes) {
     };
 
     const { error } = await supabase.from("listas_compartilhadas").insert(novaLista);
-
     if (error) {
-      if (error.code === "23505") { ultimaFalha = error; continue; } // código repetido
+      if (error.code === "23505") { ultimaFalha = error; continue; }
       throw new Error("Não consegui criar a lista: " + error.message);
     }
 
@@ -233,15 +259,6 @@ export async function criarListaCompartilhada(userId, nome, opcoes) {
     if (erroMembro && !String(erroMembro.message || "").includes("duplicate")) {
       throw new Error("Lista criada, mas não consegui te adicionar: " + erroMembro.message);
     }
-
-    try {
-      const { data: lida } = await supabase
-        .from("listas_compartilhadas")
-        .select("*")
-        .eq("id", id)
-        .maybeSingle();
-      if (lida) return lida;
-    } catch (e) { /* cai no retorno local */ }
     return novaLista;
   }
   throw new Error("Não consegui gerar um código único: " + (ultimaFalha?.message || ""));

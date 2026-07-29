@@ -393,6 +393,27 @@ function juntarListas(daNuvem, doAparelho) {
   return resultado;
 }
 
+// Duas coleções de listas compartilhadas são "iguais" para a tela quando têm as
+// mesmas listas, com o mesmo nome, permissão e os mesmos títulos dentro. Serve
+// para não re-renderizar à toa a cada verificação periódica.
+function mesmasListas(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (
+      x.id !== y.id ||
+      x.nome !== y.nome ||
+      Boolean(x.somente_dono_edita) !== Boolean(y.somente_dono_edita) ||
+      (x.itens || []).length !== (y.itens || []).length
+    ) return false;
+    const ix = x.itens || [], iy = y.itens || [];
+    for (let j = 0; j < ix.length; j++) {
+      if (ix[j].id !== iy[j].id) return false;
+    }
+  }
+  return true;
+}
+
 function mesmaObra(a, b) {
   return (
     (a.titulo || "").trim().toLowerCase() === (b.titulo || "").trim().toLowerCase() &&
@@ -1143,19 +1164,23 @@ export default function Pitaco() {
     return () => cancelamentos.forEach((c) => c && c());
   }, [usuario && usuario.id, compartilhadas.map((l) => l.id).join(",")]);
 
-  // Rede de segurança do tempo real: se o Realtime não entregar um evento (rede
-  // instável, aba dormindo, aparelho que acabou de acordar), recarregamos a cada
-  // 4s enquanto a aba está visível e há lista compartilhada. É uma consulta
-  // pequena e garante que nada fique preso mesmo quando o push falha.
+  // Rede de segurança do tempo real.
+  //
+  // Importante: isto roda mesmo quando a pessoa AINDA NÃO TEM nenhuma lista
+  // compartilhada. Era exatamente esse o bug de "entrei pelo código e não
+  // apareceu nada": quem tinha zero listas não tinha nem tempo real (a
+  // assinatura é por lista) nem verificação periódica, então ficava preso até
+  // recarregar a página na mão. Agora, quem acabou de ser convidado recebe a
+  // lista em poucos segundos sozinho.
   useEffect(() => {
-    if (!usuario || compartilhadas.length === 0) return;
+    if (!usuario) return;
     const intervalo = setInterval(() => {
       if (document.visibilityState === "visible") {
         recarregarColaborativas(usuario.id, false);
       }
     }, 4000);
     return () => clearInterval(intervalo);
-  }, [usuario && usuario.id, compartilhadas.length]);
+  }, [usuario && usuario.id]);
 
   // Salva as mudanças. O aparelho recebe na hora (funciona offline e abre
   // rápido); a nuvem recebe com meio segundo de espera, para não disparar uma
@@ -1844,7 +1869,10 @@ Regras:
     if (!uid) { setCompartilhadas([]); setMembrosPorLista({}); return []; }
     try {
       const cs = await carregarCompartilhadas();
-      setCompartilhadas(cs);
+      // Só mexe no estado se algo mudou de verdade. Sem isto, a verificação a
+      // cada 4s criaria um array novo sempre e re-renderizaria a página inteira
+      // sem necessidade (some com o foco de campos, pisca a tela).
+      setCompartilhadas((prev) => (mesmasListas(prev, cs) ? prev : cs));
       if (comMembros) carregarTodosMembros(cs);
       return cs;
     } catch (e) {
@@ -1913,10 +1941,19 @@ Regras:
     setOcupadoCompart(true);
     try {
       const listaId = await entrarPorCodigo(cod);
-      const cs = await recarregarColaborativas(usuario.id);
-      const entrou = Array.isArray(cs) && cs.some((l) => l.id === listaId);
+      // Às vezes a filiação leva um instante para valer na leitura. Em vez de
+      // desistir na primeira tentativa, tentamos algumas vezes com uma pausa
+      // curta — para quem entra, a lista simplesmente aparece.
+      let entrou = false;
+      for (let tentativa = 0; tentativa < 4 && !entrou; tentativa++) {
+        if (tentativa > 0) await esperar(500);
+        const cs = await recarregarColaborativas(usuario.id);
+        entrou = Array.isArray(cs) && cs.some((l) => l.id === listaId);
+      }
       if (!entrou) {
-        setErroCompart("Você entrou, mas a lista demorou a carregar. Recarregue a página.");
+        setErroCompart(
+          "Você entrou na lista, mas ela demorou a carregar. Ela deve aparecer em instantes."
+        );
         return;
       }
       setEntrarAberto(false);
