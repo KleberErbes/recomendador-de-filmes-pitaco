@@ -194,14 +194,18 @@ function gerarCodigo() {
 }
 
 // Cria uma lista compartilhada e já entra o dono como membro. Devolve a lista.
-export async function criarListaCompartilhada(userId, nome, itensIniciais) {
+// Cria uma lista compartilhada e já entra o dono como membro.
+// opcoes: { somenteDonoEdita: boolean, itens: [] }
+export async function criarListaCompartilhada(userId, nome, opcoes) {
   if (!supabase || !userId) throw new Error("Conta indisponível.");
+  const op = opcoes || {};
 
   let ultimaFalha = null;
   for (let tentativa = 0; tentativa < 5; tentativa++) {
     const codigo = gerarCodigo();
-    // Geramos o id no cliente para saber qual linha é sem depender de .select()
-    // (que exigiria ler antes de ser membro). Fallback caso randomUUID falte.
+    // Geramos o id aqui para não precisar de .select() logo após o insert (o
+    // select exigiria ler a linha, mas a leitura só é liberada depois que
+    // viramos membro — o que acontece no passo seguinte).
     const id =
       typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
@@ -209,31 +213,27 @@ export async function criarListaCompartilhada(userId, nome, itensIniciais) {
 
     const novaLista = {
       id,
-      nome: (nome || "lista compartilhada").trim(),
+      nome: (nome || "lista compartilhada").trim().slice(0, 80),
       codigo,
       dono: userId,
-      itens: itensIniciais || [],
+      itens: Array.isArray(op.itens) ? op.itens : [],
+      somente_dono_edita: Boolean(op.somenteDonoEdita),
     };
 
-    const { error } = await supabase
-      .from("listas_compartilhadas")
-      .insert(novaLista);
+    const { error } = await supabase.from("listas_compartilhadas").insert(novaLista);
 
     if (error) {
-      // Código repetido: tenta outro. Qualquer outro erro é reportado.
-      if (error.code === "23505") { ultimaFalha = error; continue; }
+      if (error.code === "23505") { ultimaFalha = error; continue; } // código repetido
       throw new Error("Não consegui criar a lista: " + error.message);
     }
 
-    // Vira membro — a partir daqui a leitura/edição é permitida.
     const { error: erroMembro } = await supabase
       .from("membros_lista")
       .insert({ lista_id: id, user_id: userId });
-    if (erroMembro && error.code !== "23505" && !String(erroMembro.message || "").includes("duplicate")) {
-      throw new Error("Lista criada, mas não consegui te adicionar como membro: " + erroMembro.message);
+    if (erroMembro && !String(erroMembro.message || "").includes("duplicate")) {
+      throw new Error("Lista criada, mas não consegui te adicionar: " + erroMembro.message);
     }
 
-    // Devolve o registro (relê se der; senão usa o que montamos).
     try {
       const { data: lida } = await supabase
         .from("listas_compartilhadas")
@@ -241,33 +241,34 @@ export async function criarListaCompartilhada(userId, nome, itensIniciais) {
         .eq("id", id)
         .maybeSingle();
       if (lida) return lida;
-    } catch (e) { /* usa o objeto local abaixo */ }
+    } catch (e) { /* cai no retorno local */ }
     return novaLista;
   }
   throw new Error("Não consegui gerar um código único: " + (ultimaFalha?.message || ""));
 }
 
-// Entra numa lista pelo código (chama a função do banco que valida e adiciona).
-// Devolve o id da lista.
+// Entra numa lista pelo código. A função do banco valida o código e insere a
+// filiação — inclusive quando a pessoa ainda não pode ler a lista.
 export async function entrarPorCodigo(codigo) {
   if (!supabase) throw new Error("Conta indisponível.");
-  const { data, error } = await supabase.rpc("entrar_por_codigo", {
-    p_codigo: (codigo || "").trim(),
-  });
+  const limpo = (codigo || "").trim().toUpperCase();
+  if (limpo.length < 4) throw new Error("Código muito curto.");
+  const { data, error } = await supabase.rpc("entrar_por_codigo", { p_codigo: limpo });
   if (error) {
     const m = (error.message || "").toLowerCase();
     if (m.includes("não encontrado") || m.includes("nao encontrado")) {
-      throw new Error("Código não encontrado. Confira e tente de novo.");
+      throw new Error("Código não encontrado. Confira as letras e tente de novo.");
     }
+    if (m.includes("logado")) throw new Error("Entre na sua conta antes de usar o código.");
     throw new Error(error.message);
   }
   return data; // id da lista
 }
 
-// Lista todas as listas compartilhadas das quais o usuário é membro.
-export async function carregarCompartilhadas(userId) {
-  if (!supabase || !userId) return [];
-  // Graças às políticas, o select já devolve só as listas de que sou membro.
+// Todas as listas compartilhadas de que sou membro (a política de leitura já
+// filtra: só volta o que é meu).
+export async function carregarCompartilhadas() {
+  if (!supabase) return [];
   const { data, error } = await supabase
     .from("listas_compartilhadas")
     .select("*")
@@ -276,17 +277,71 @@ export async function carregarCompartilhadas(userId) {
   return data || [];
 }
 
-// Salva os itens de uma lista compartilhada.
-export async function salvarItensCompartilhada(listaId, itens) {
+// Quem participa de uma lista. Devolve [{ user_id, apelido, entrou_em, e_dono }].
+export async function carregarMembros(listaId) {
+  if (!supabase || !listaId) return [];
+  const { data, error } = await supabase.rpc("membros_da_lista", { p_lista: listaId });
+  if (error) throw new Error("Não consegui ver os membros: " + error.message);
+  return data || [];
+}
+
+// Adiciona UM item. O banco resolve tudo numa operação só, então dois amigos
+// adicionando ao mesmo tempo não se sobrescrevem. Devolve a lista de itens
+// já atualizada.
+export async function adicionarItemCompartilhada(listaId, item) {
+  if (!supabase || !listaId) throw new Error("Lista indisponível.");
+  const { data, error } = await supabase.rpc("item_add", {
+    p_lista: listaId,
+    p_item: item,
+  });
+  if (error) throw new Error(traduzErro(error.message));
+  return Array.isArray(data) ? data : [];
+}
+
+// Remove UM item pelo id, também de forma atômica.
+export async function removerItemCompartilhada(listaId, itemId) {
+  if (!supabase || !listaId) throw new Error("Lista indisponível.");
+  const { data, error } = await supabase.rpc("item_remove", {
+    p_lista: listaId,
+    p_item_id: String(itemId),
+  });
+  if (error) throw new Error(traduzErro(error.message));
+  return Array.isArray(data) ? data : [];
+}
+
+// Liga/desliga "só o dono edita".
+export async function definirPermissao(listaId, somenteDonoEdita) {
   if (!supabase || !listaId) return;
   const { error } = await supabase
     .from("listas_compartilhadas")
-    .update({ itens: itens || [] })
+    .update({ somente_dono_edita: Boolean(somenteDonoEdita) })
     .eq("id", listaId);
-  if (error) throw new Error("Não consegui salvar a lista: " + error.message);
+  if (error) throw new Error("Não consegui mudar a permissão: " + error.message);
 }
 
-// Sai de uma lista (remove a própria filiação).
+// Renomeia a lista.
+export async function renomearCompartilhada(listaId, nome) {
+  if (!supabase || !listaId) return;
+  const limpo = (nome || "").trim().slice(0, 80);
+  if (!limpo) throw new Error("O nome não pode ficar vazio.");
+  const { error } = await supabase
+    .from("listas_compartilhadas")
+    .update({ nome: limpo })
+    .eq("id", listaId);
+  if (error) throw new Error("Não consegui renomear: " + error.message);
+}
+
+// O dono remove alguém da lista.
+export async function removerMembro(listaId, userId) {
+  if (!supabase || !listaId || !userId) return;
+  const { error } = await supabase.rpc("remover_membro", {
+    p_lista: listaId,
+    p_user: userId,
+  });
+  if (error) throw new Error(error.message);
+}
+
+// Sair de uma lista (apaga a própria filiação).
 export async function sairDaCompartilhada(listaId, userId) {
   if (!supabase || !listaId || !userId) return;
   const { error } = await supabase
@@ -297,30 +352,44 @@ export async function sairDaCompartilhada(listaId, userId) {
   if (error) throw new Error("Não consegui sair da lista: " + error.message);
 }
 
-// Apaga a lista inteira (só o dono consegue, por política).
+// Apagar a lista inteira (só o dono, por política do banco).
 export async function apagarCompartilhada(listaId) {
   if (!supabase || !listaId) return;
-  const { error } = await supabase
-    .from("listas_compartilhadas")
-    .delete()
-    .eq("id", listaId);
+  const { error } = await supabase.from("listas_compartilhadas").delete().eq("id", listaId);
   if (error) throw new Error("Não consegui apagar a lista: " + error.message);
 }
 
-// Assina mudanças ao vivo numa lista compartilhada (Realtime). Chama "onMudou"
-// com os novos itens sempre que alguém edita. Devolve uma função para cancelar.
-export function ouvirCompartilhada(listaId, onMudou) {
+// Escuta uma lista ao vivo: mudanças nos itens/nome/permissão e entrada ou
+// saída de membros. Devolve uma função para cancelar a assinatura.
+export function ouvirCompartilhada(listaId, aoMudarLista, aoMudarMembros) {
   if (!supabase || !listaId) return () => {};
   const canal = supabase
     .channel("lista-" + listaId)
     .on(
       "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "listas_compartilhadas", filter: "id=eq." + listaId },
+      {
+        event: "*",
+        schema: "public",
+        table: "listas_compartilhadas",
+        filter: "id=eq." + listaId,
+      },
       (payload) => {
-        if (payload.new && Array.isArray(payload.new.itens)) {
-          onMudou(payload.new.itens);
+        if (payload.eventType === "DELETE") {
+          aoMudarLista && aoMudarLista(null);
+          return;
         }
+        if (payload.new) aoMudarLista && aoMudarLista(payload.new);
       }
+    )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "membros_lista",
+        filter: "lista_id=eq." + listaId,
+      },
+      () => { aoMudarMembros && aoMudarMembros(); }
     )
     .subscribe();
   return () => {
@@ -334,6 +403,9 @@ export function ouvirCompartilhada(listaId, onMudou) {
 // a pessoa entenda. Mensagens desconhecidas passam como vieram.
 function traduzErro(msg) {
   const m = (msg || "").toLowerCase();
+  if (m.includes("permissão para editar") || m.includes("permissao para editar")) {
+    return "Nesta lista só quem criou pode adicionar ou remover títulos.";
+  }
   if (m.includes("invalid path specified")) {
     return "A URL do Supabase parece errada. Ela deve ser só https://seu-projeto.supabase.co (sem barra no final e sem caminho depois).";
   }

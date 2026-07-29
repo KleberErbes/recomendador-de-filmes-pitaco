@@ -14,7 +14,12 @@ import {
   criarListaCompartilhada,
   entrarPorCodigo,
   carregarCompartilhadas,
-  salvarItensCompartilhada,
+  carregarMembros,
+  adicionarItemCompartilhada,
+  removerItemCompartilhada,
+  definirPermissao,
+  renomearCompartilhada,
+  removerMembro,
   sairDaCompartilhada,
   apagarCompartilhada,
   ouvirCompartilhada,
@@ -906,6 +911,15 @@ export default function Pitaco() {
   const [ocupadoCompart, setOcupadoCompart] = useState(false);
   const [linkCopiado, setLinkCopiado] = useState(false);
   const [codigoCopiado, setCodigoCopiado] = useState(false);
+  // Modal de criação: nome + quem pode editar.
+  const [criarAberto, setCriarAberto] = useState(false);
+  const [nomeCompart, setNomeCompart] = useState("");
+  const [soDonoEdita, setSoDonoEdita] = useState(false);
+  // Membros por lista: { [listaId]: [{ user_id, apelido, e_dono }] }
+  const [membrosPorLista, setMembrosPorLista] = useState({});
+  // Lista sendo renomeada (id) e o texto em edição.
+  const [renomeando, setRenomeando] = useState(null);
+  const [nomeRenomear, setNomeRenomear] = useState("");
   const [copiado, setCopiado] = useState(false);
   const [nomeNovaLista, setNomeNovaLista] = useState("");
   const [confirmaApagar, setConfirmaApagar] = useState(null);
@@ -1104,31 +1118,42 @@ export default function Pitaco() {
     };
   }, [usuario && usuario.id]);
 
-  // Tempo real: ouve mudanças em cada lista colaborativa e atualiza a tela na
-  // hora que outro membro edita. Reassina quando o conjunto de listas muda.
+  // Tempo real: ouve cada lista colaborativa. Chega a LINHA inteira, então
+  // itens, nome e permissão atualizam juntos. Entrada/saída de membro dispara
+  // uma releitura da lista de membros. Reassina só quando o conjunto de listas
+  // muda (não a cada filme adicionado).
   useEffect(() => {
     if (!usuario || compartilhadas.length === 0) return;
     const cancelamentos = compartilhadas.map((l) =>
-      ouvirCompartilhada(l.id, (novosItens) => {
-        setCompartilhadas((prev) =>
-          prev.map((x) => (x.id === l.id ? { ...x, itens: novosItens } : x))
-        );
-      })
+      ouvirCompartilhada(
+        l.id,
+        (linha) => {
+          if (linha === null) {
+            // A lista foi apagada pelo dono enquanto eu estava com ela aberta.
+            setCompartilhadas((prev) => prev.filter((x) => x.id !== l.id));
+            return;
+          }
+          setCompartilhadas((prev) =>
+            prev.map((x) => (x.id === l.id ? { ...x, ...linha } : x))
+          );
+        },
+        () => recarregarMembros(l.id)
+      )
     );
     return () => cancelamentos.forEach((c) => c && c());
   }, [usuario && usuario.id, compartilhadas.map((l) => l.id).join(",")]);
 
-  // Rede de segurança para o tempo real: mesmo que o Realtime não entregue um
-  // evento (rede instável, aba dormindo), recarrega as compartilhadas a cada 8s
-  // enquanto houver alguma. É leve (uma consulta pequena) e garante que a lista
-  // do amigo apareça em poucos segundos mesmo sem o push ao vivo.
+  // Rede de segurança do tempo real: se o Realtime não entregar um evento (rede
+  // instável, aba dormindo, aparelho que acabou de acordar), recarregamos a cada
+  // 4s enquanto a aba está visível e há lista compartilhada. É uma consulta
+  // pequena e garante que nada fique preso mesmo quando o push falha.
   useEffect(() => {
     if (!usuario || compartilhadas.length === 0) return;
     const intervalo = setInterval(() => {
       if (document.visibilityState === "visible") {
-        recarregarColaborativas(usuario.id);
+        recarregarColaborativas(usuario.id, false);
       }
-    }, 8000);
+    }, 4000);
     return () => clearInterval(intervalo);
   }, [usuario && usuario.id, compartilhadas.length]);
 
@@ -1795,35 +1820,80 @@ Regras:
   }
 
   // ---------------- LISTAS COLABORATIVAS (em tempo real) ----------------
-  // Diferente do "compartilhar" acima (que gera um PNG para mandar no zap), aqui
-  // a lista é EDITÁVEL por vários membros ao mesmo tempo, guardada no banco.
+  // Regra de ouro daqui: nunca gravamos a lista inteira por cima. Adicionar e
+  // remover passam por funções do banco que mexem em UM item de forma atômica,
+  // então dois amigos editando junto não apagam o trabalho um do outro.
+
+  // Apelido curto de quem está usando, para marcar quem adicionou cada título.
+  const meuApelido = usuario && usuario.email
+    ? String(usuario.email).split("@")[0]
+    : "";
+
+  function podeEditar(lista) {
+    if (!lista || !usuario) return false;
+    return !lista.somente_dono_edita || lista.dono === usuario.id;
+  }
+  function souDono(lista) {
+    return Boolean(lista && usuario && lista.dono === usuario.id);
+  }
 
   // Carrega as listas colaborativas de que sou membro.
-  async function recarregarColaborativas(uid) {
-    if (!uid) { setCompartilhadas([]); return; }
+  // comMembros=false é usado pela checagem periódica: só as listas, sem uma
+  // consulta de membros por lista — mantém a verificação frequente barata.
+  async function recarregarColaborativas(uid, comMembros = true) {
+    if (!uid) { setCompartilhadas([]); setMembrosPorLista({}); return []; }
     try {
-      const cs = await carregarCompartilhadas(uid);
+      const cs = await carregarCompartilhadas();
       setCompartilhadas(cs);
+      if (comMembros) carregarTodosMembros(cs);
       return cs;
     } catch (e) {
-      // Mostra na tela em vez de só no console — senão "não aparece nada" fica
-      // sem explicação.
       setErroCompart("Não consegui carregar as listas: " + String(e.message || e));
       console.error("[Pitaco] Falha ao carregar colaborativas:", e);
       return [];
     }
   }
 
-  // Cria uma lista colaborativa (opcionalmente a partir de uma pessoal, levando
-  // os itens) e abre o painel com o código/link para convidar.
-  async function criarColaborativa(nome, itensIniciais) {
-    if (precisaDeConta("Crie uma conta para ter listas colaborativas.")) return;
+  // Busca os membros de várias listas em paralelo (falha em uma não derruba as
+  // outras — o Promise.allSettled garante isso).
+  async function carregarTodosMembros(listas) {
+    if (!listas || listas.length === 0) return;
+    const res = await Promise.allSettled(listas.map((l) => carregarMembros(l.id)));
+    const mapa = {};
+    listas.forEach((l, i) => {
+      if (res[i].status === "fulfilled") mapa[l.id] = res[i].value;
+    });
+    setMembrosPorLista((prev) => ({ ...prev, ...mapa }));
+  }
+
+  async function recarregarMembros(listaId) {
+    try {
+      const ms = await carregarMembros(listaId);
+      setMembrosPorLista((prev) => ({ ...prev, [listaId]: ms }));
+    } catch (e) { /* silencioso: a lista em si continua utilizável */ }
+  }
+
+  // Cria a lista com nome e permissão escolhidos no modal.
+  async function criarColaborativa() {
+    if (precisaDeConta("Crie uma conta para ter listas compartilhadas.")) return;
+    const nome = nomeCompart.trim();
+    if (!nome) {
+      setErroCompart("Dê um nome para a lista.");
+      return;
+    }
     setErroCompart("");
     setOcupadoCompart(true);
     try {
-      const nova = await criarListaCompartilhada(usuario.id, nome, itensIniciais || []);
+      const nova = await criarListaCompartilhada(usuario.id, nome, {
+        somenteDonoEdita: soDonoEdita,
+        itens: [],
+      });
       setCompartilhadas((prev) => [...prev, nova]);
-      setPainelCompartilhar(nova);
+      recarregarMembros(nova.id);
+      setCriarAberto(false);
+      setNomeCompart("");
+      setSoDonoEdita(false);
+      setPainelCompartilhar(nova); // já abre o convite com código e link
     } catch (e) {
       setErroCompart(String(e.message || e));
     } finally {
@@ -1833,7 +1903,7 @@ Regras:
 
   // Entra numa lista pelo código digitado.
   async function entrarNaColaborativa() {
-    if (precisaDeConta("Crie uma conta para entrar numa lista colaborativa.")) return;
+    if (precisaDeConta("Crie uma conta para entrar numa lista compartilhada.")) return;
     const cod = codigoEntrar.trim();
     if (cod.length < 4) {
       setErroCompart("Digite o código que seu amigo te passou.");
@@ -1844,14 +1914,9 @@ Regras:
     try {
       const listaId = await entrarPorCodigo(cod);
       const cs = await recarregarColaborativas(usuario.id);
-      // Confirma que a lista que acabamos de entrar veio na recarga. Se não
-      // veio, a política de leitura não reconheceu a filiação — avisa em vez de
-      // fechar o modal como se tudo tivesse dado certo.
       const entrou = Array.isArray(cs) && cs.some((l) => l.id === listaId);
       if (!entrou) {
-        setErroCompart(
-          "Você entrou, mas a lista não carregou. Puxe a tela para atualizar ou recarregue o app."
-        );
+        setErroCompart("Você entrou, mas a lista demorou a carregar. Recarregue a página.");
         return;
       }
       setEntrarAberto(false);
@@ -1863,44 +1928,95 @@ Regras:
     }
   }
 
-  // Adiciona/remove um filme numa lista colaborativa (grava no banco na hora).
+  // Adiciona/remove um título numa lista compartilhada. O banco devolve a lista
+  // de itens já resolvida, então a tela reflete exatamente o que ficou salvo.
   async function alternarNaColaborativa(lista, obra) {
-    const existe = (lista.itens || []).some((i) => mesmaObra(i, obra));
-    const novos = existe
-      ? lista.itens.filter((i) => !mesmaObra(i, obra))
-      : [...(lista.itens || []), paraItem(obra)];
-    // Atualiza na tela já (otimista) e persiste.
-    setCompartilhadas((prev) =>
-      prev.map((l) => (l.id === lista.id ? { ...l, itens: novos } : l))
-    );
+    if (!podeEditar(lista)) {
+      setErroCompart("Nesta lista só quem criou pode adicionar ou remover títulos.");
+      return;
+    }
+    const existente = (lista.itens || []).find((i) => mesmaObra(i, obra));
+    setErroCompart("");
     try {
-      await salvarItensCompartilhada(lista.id, novos);
+      const itens = existente
+        ? await removerItemCompartilhada(lista.id, existente.id)
+        : await adicionarItemCompartilhada(lista.id, {
+            ...paraItem(obra),
+            por: meuApelido,
+          });
+      setCompartilhadas((prev) =>
+        prev.map((l) => (l.id === lista.id ? { ...l, itens } : l))
+      );
     } catch (e) {
       setErroCompart(String(e.message || e));
-      recarregarColaborativas(usuario && usuario.id); // reverte para o estado real
+      recarregarColaborativas(usuario && usuario.id);
     }
   }
 
   async function removerDaColaborativa(lista, itemId) {
-    const novos = (lista.itens || []).filter((i) => i.id !== itemId);
+    if (!podeEditar(lista)) {
+      setErroCompart("Nesta lista só quem criou pode remover títulos.");
+      return;
+    }
+    try {
+      const itens = await removerItemCompartilhada(lista.id, itemId);
+      setCompartilhadas((prev) =>
+        prev.map((l) => (l.id === lista.id ? { ...l, itens } : l))
+      );
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+      recarregarColaborativas(usuario && usuario.id);
+    }
+  }
+
+  // Dono liga/desliga "só eu edito".
+  async function alternarPermissao(lista) {
+    if (!souDono(lista)) return;
+    const novo = !lista.somente_dono_edita;
     setCompartilhadas((prev) =>
-      prev.map((l) => (l.id === lista.id ? { ...l, itens: novos } : l))
+      prev.map((l) => (l.id === lista.id ? { ...l, somente_dono_edita: novo } : l))
     );
     try {
-      await salvarItensCompartilhada(lista.id, novos);
+      await definirPermissao(lista.id, novo);
     } catch (e) {
+      setErroCompart(String(e.message || e));
       recarregarColaborativas(usuario && usuario.id);
+    }
+  }
+
+  async function confirmarRenomear(lista) {
+    const nome = nomeRenomear.trim();
+    if (!nome) return;
+    setCompartilhadas((prev) =>
+      prev.map((l) => (l.id === lista.id ? { ...l, nome } : l))
+    );
+    setRenomeando(null);
+    try {
+      await renomearCompartilhada(lista.id, nome);
+    } catch (e) {
+      setErroCompart(String(e.message || e));
+      recarregarColaborativas(usuario && usuario.id);
+    }
+  }
+
+  async function tirarMembro(lista, userId) {
+    try {
+      await removerMembro(lista.id, userId);
+      recarregarMembros(lista.id);
+    } catch (e) {
+      setErroCompart(String(e.message || e));
     }
   }
 
   async function sairOuApagarColaborativa(lista) {
     try {
-      if (usuario && lista.dono === usuario.id) {
+      if (souDono(lista)) {
         await apagarCompartilhada(lista.id);
       } else {
         await sairDaCompartilhada(lista.id, usuario.id);
       }
       setCompartilhadas((prev) => prev.filter((l) => l.id !== lista.id));
+      setPainelCompartilhar(null);
     } catch (e) {
       setErroCompart(String(e.message || e));
     }
@@ -1998,7 +2114,9 @@ Regras:
     return {
       obra,
       listas,
-      compartilhadas,
+      // Só oferecemos as compartilhadas em que esta pessoa pode mesmo editar —
+      // mostrar uma lista "só leitura" no menu levaria a um clique que falha.
+      compartilhadas: compartilhadas.filter((l) => podeEditar(l)),
       usuarioId: usuario ? usuario.id : null,
       aberto: menuSalvar === chaveCard,
       salvo: obraSalva(obra),
@@ -2179,15 +2297,92 @@ Regras:
         </div>
       )}
 
-      {/* painel de convite: mostra o código e o link para os amigos entrarem */}
-      {painelCompartilhar && (
-        <div className="busca-fundo" onClick={() => setPainelCompartilhar(null)} role="presentation">
+      {/* modal de criar lista compartilhada: nome + quem pode editar */}
+      {criarAberto && (
+        <div className="busca-fundo" onClick={() => setCriarAberto(false)} role="presentation">
           <div
             className="conta-caixa vidro"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-label="Convidar para a lista"
+            aria-label="Criar lista compartilhada"
+          >
+            <button
+              className="busca-fechar conta-fechar"
+              onClick={() => setCriarAberto(false)}
+              aria-label="Fechar"
+            >
+              ×
+            </button>
+            <p className="conta-etiqueta">nova lista compartilhada</p>
+
+            <label className="conta-campo">
+              <span>nome da lista</span>
+              <input
+                type="text"
+                value={nomeCompart}
+                onChange={(e) => setNomeCompart(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !ocupadoCompart) criarColaborativa();
+                }}
+                placeholder="ex.: maratona com a galera"
+                maxLength={80}
+                autoFocus
+              />
+            </label>
+
+            <p className="conta-etiqueta" style={{ marginTop: 4 }}>quem pode editar</p>
+            <div className="perm-opcoes" role="radiogroup" aria-label="Quem pode editar">
+              <button
+                role="radio"
+                aria-checked={!soDonoEdita}
+                className={"perm-opcao" + (!soDonoEdita ? " ativa" : "")}
+                onClick={() => setSoDonoEdita(false)}
+              >
+                <span className="perm-titulo">todos editam</span>
+                <span className="perm-desc">qualquer membro adiciona e remove</span>
+              </button>
+              <button
+                role="radio"
+                aria-checked={soDonoEdita}
+                className={"perm-opcao" + (soDonoEdita ? " ativa" : "")}
+                onClick={() => setSoDonoEdita(true)}
+              >
+                <span className="perm-titulo">só eu edito</span>
+                <span className="perm-desc">os convidados só olham a lista</span>
+              </button>
+            </div>
+
+            {erroCompart && <p className="conta-erro">{erroCompart}</p>}
+
+            <button
+              className="conta-botao principal"
+              onClick={criarColaborativa}
+              disabled={ocupadoCompart}
+            >
+              {ocupadoCompart ? "criando…" : "criar e convidar"}
+            </button>
+            <p className="conta-texto" style={{ fontSize: 12 }}>
+              Você pode mudar a permissão depois, a qualquer momento.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* painel da lista compartilhada: código, link, membros e ajustes */}
+      {painelCompartilhar && (() => {
+        const lista =
+          compartilhadas.find((l) => l.id === painelCompartilhar.id) || painelCompartilhar;
+        const dono = souDono(lista);
+        const membros = membrosPorLista[lista.id] || [];
+        return (
+        <div className="busca-fundo" onClick={() => setPainelCompartilhar(null)} role="presentation">
+          <div
+            className="conta-caixa vidro painel-lista"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={"Lista compartilhada " + lista.nome}
           >
             <button
               className="busca-fechar conta-fechar"
@@ -2196,19 +2391,52 @@ Regras:
             >
               ×
             </button>
-            <p className="conta-etiqueta">convidar para</p>
-            <p className="conta-email">{painelCompartilhar.nome}</p>
+
+            <p className="conta-etiqueta">lista compartilhada</p>
+
+            {/* Nome — o dono pode renomear ali mesmo */}
+            {renomeando === lista.id ? (
+              <div className="renomear-linha">
+                <input
+                  className="renomear-campo"
+                  value={nomeRenomear}
+                  onChange={(e) => setNomeRenomear(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirmarRenomear(lista);
+                    if (e.key === "Escape") setRenomeando(null);
+                  }}
+                  maxLength={80}
+                  autoFocus
+                />
+                <button className="compart-mini" onClick={() => confirmarRenomear(lista)}>
+                  salvar
+                </button>
+              </div>
+            ) : (
+              <div className="renomear-linha">
+                <p className="conta-email">{lista.nome}</p>
+                {dono && (
+                  <button
+                    className="compart-mini"
+                    onClick={() => { setRenomeando(lista.id); setNomeRenomear(lista.nome); }}
+                  >
+                    renomear
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Convite: código e link */}
             <p className="conta-texto">
-              Seus amigos entram com o código abaixo, ou clicando no link. Todos
-              podem adicionar e remover filmes.
+              Para convidar, mande o código ou o link. Quem entrar vira membro na hora.
             </p>
 
             <div className="convite-codigo">
-              <span className="convite-codigo-valor">{painelCompartilhar.codigo}</span>
+              <span className="convite-codigo-valor">{lista.codigo}</span>
               <button
                 className="compart-mini"
                 onClick={() => {
-                  try { navigator.clipboard.writeText(painelCompartilhar.codigo); } catch (e) {}
+                  try { navigator.clipboard.writeText(lista.codigo); } catch (e) {}
                   setCodigoCopiado(true);
                   setTimeout(() => setCodigoCopiado(false), 1800);
                 }}
@@ -2220,7 +2448,7 @@ Regras:
             <button
               className="conta-botao principal"
               onClick={() => {
-                const link = linkConvite(painelCompartilhar.codigo);
+                const link = linkConvite(lista.codigo);
                 try { navigator.clipboard.writeText(link); } catch (e) {}
                 setLinkCopiado(true);
                 setTimeout(() => setLinkCopiado(false), 1800);
@@ -2228,9 +2456,89 @@ Regras:
             >
               {linkCopiado ? "link copiado ✓" : "copiar link do convite"}
             </button>
+
+            {/* Membros */}
+            <div className="membros-bloco">
+              <p className="conta-etiqueta">
+                membros {membros.length > 0 && "· " + membros.length}
+              </p>
+              {membros.length === 0 ? (
+                <p className="membros-vazio">carregando…</p>
+              ) : (
+                <ul className="membros-lista">
+                  {membros.map((m) => (
+                    <li className="membro-item" key={m.user_id}>
+                      <span className="membro-inicial" aria-hidden="true">
+                        {(m.apelido || "?").charAt(0).toUpperCase()}
+                      </span>
+                      <span className="membro-nome">
+                        {m.apelido}
+                        {usuario && m.user_id === usuario.id && (
+                          <em className="membro-voce">você</em>
+                        )}
+                      </span>
+                      {m.e_dono ? (
+                        <span className="membro-tag">criou</span>
+                      ) : dono ? (
+                        <button
+                          className="membro-tirar"
+                          onClick={() => tirarMembro(lista, m.user_id)}
+                          title={"Remover " + m.apelido + " da lista"}
+                        >
+                          remover
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Permissão — só o dono muda */}
+            {dono ? (
+              <div className="membros-bloco">
+                <p className="conta-etiqueta">quem pode editar</p>
+                <div className="perm-opcoes" role="radiogroup" aria-label="Quem pode editar">
+                  <button
+                    role="radio"
+                    aria-checked={!lista.somente_dono_edita}
+                    className={"perm-opcao" + (!lista.somente_dono_edita ? " ativa" : "")}
+                    onClick={() => { if (lista.somente_dono_edita) alternarPermissao(lista); }}
+                  >
+                    <span className="perm-titulo">todos editam</span>
+                    <span className="perm-desc">qualquer membro adiciona e remove</span>
+                  </button>
+                  <button
+                    role="radio"
+                    aria-checked={Boolean(lista.somente_dono_edita)}
+                    className={"perm-opcao" + (lista.somente_dono_edita ? " ativa" : "")}
+                    onClick={() => { if (!lista.somente_dono_edita) alternarPermissao(lista); }}
+                  >
+                    <span className="perm-titulo">só eu edito</span>
+                    <span className="perm-desc">os convidados só olham</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="membros-aviso">
+                {lista.somente_dono_edita
+                  ? "Nesta lista só quem criou pode adicionar ou remover títulos."
+                  : "Todos os membros podem adicionar e remover títulos."}
+              </p>
+            )}
+
+            {erroCompart && <p className="conta-erro">{erroCompart}</p>}
+
+            <button
+              className="conta-botao perigo"
+              onClick={() => sairOuApagarColaborativa(lista)}
+            >
+              {dono ? "apagar esta lista" : "sair desta lista"}
+            </button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* modal de entrar numa lista pelo código */}
       {entrarAberto && (
@@ -2917,7 +3225,13 @@ Regras:
             <div className="compart-acoes" data-revelar>
               <button
                 className="botao-vidro compart-btn"
-                onClick={() => criarColaborativa(nomeNovaLista.trim() || "lista com amigos")}
+                onClick={() => {
+                  if (precisaDeConta("Crie uma conta para ter listas compartilhadas.")) return;
+                  setErroCompart("");
+                  setNomeCompart(nomeNovaLista.trim());
+                  setSoDonoEdita(false);
+                  setCriarAberto(true);
+                }}
                 disabled={ocupadoCompart}
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2950,33 +3264,48 @@ Regras:
               {compartilhadas.map((l) => (
                 <article className="compart-card" key={l.id}>
                   <header className="compart-card-topo">
-                    <div>
+                    <div className="compart-card-info">
                       <span className="compart-tag">
-                        compartilhada{usuario && l.dono === usuario.id ? " · sua" : ""}
+                        compartilhada{souDono(l) ? " · sua" : ""}
+                        {l.somente_dono_edita && (
+                          <em className="compart-selo">
+                            {souDono(l) ? "só você edita" : "só leitura"}
+                          </em>
+                        )}
                       </span>
                       <h3 className="compart-nome">{l.nome}</h3>
+                      {(membrosPorLista[l.id] || []).length > 0 && (
+                        <div className="compart-membros">
+                          <span className="compart-avatares" aria-hidden="true">
+                            {(membrosPorLista[l.id] || []).slice(0, 4).map((m) => (
+                              <i key={m.user_id} title={m.apelido}>
+                                {(m.apelido || "?").charAt(0).toUpperCase()}
+                              </i>
+                            ))}
+                          </span>
+                          <span className="compart-membros-txt">
+                            {membrosPorLista[l.id].length}{" "}
+                            {membrosPorLista[l.id].length === 1 ? "membro" : "membros"}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     <div className="compart-card-botoes">
                       <button
                         className="compart-mini"
-                        onClick={() => setPainelCompartilhar(l)}
-                        title="Convidar (código e link)"
+                        onClick={() => { setErroCompart(""); setPainelCompartilhar(l); }}
+                        title="Convidar, ver membros e ajustes"
                       >
-                        convidar
-                      </button>
-                      <button
-                        className="compart-mini perigo"
-                        onClick={() => sairOuApagarColaborativa(l)}
-                        title={usuario && l.dono === usuario.id ? "Apagar a lista" : "Sair da lista"}
-                      >
-                        {usuario && l.dono === usuario.id ? "apagar" : "sair"}
+                        gerenciar
                       </button>
                     </div>
                   </header>
 
                   {(l.itens || []).length === 0 ? (
                     <p className="compart-vazia">
-                      lista vazia — salve títulos com o “+ lista” e escolha esta lista.
+                      {podeEditar(l)
+                        ? "lista vazia — salve títulos com o “+ lista” e escolha esta lista."
+                        : "lista vazia — quem criou ainda não adicionou títulos."}
                     </p>
                   ) : (
                     <div className="compart-grade">
@@ -2989,13 +3318,15 @@ Regras:
                               {[item.ano, item.tipo].filter(Boolean).join(" · ")}
                             </span>
                           </figcaption>
-                          <button
-                            className="pi-remover"
-                            aria-label={"Remover " + item.titulo}
-                            onClick={() => removerDaColaborativa(l, item.id)}
-                          >
-                            ×
-                          </button>
+                          {podeEditar(l) && (
+                            <button
+                              className="pi-remover"
+                              aria-label={"Remover " + item.titulo}
+                              onClick={() => removerDaColaborativa(l, item.id)}
+                            >
+                              ×
+                            </button>
+                          )}
                         </figure>
                       ))}
                     </div>
@@ -3523,6 +3854,132 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 }
 .compart-grade { display: flex; flex-wrap: wrap; gap: 16px; }
 .compart-item { position: relative; width: 110px; }
+
+/* ---- membros, permissão e painel de gerenciar ---- */
+.compart-card-info { min-width: 0; }
+.compart-selo {
+  font-style: normal;
+  margin-left: 8px; padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+  color: rgba(246,243,236,0.75);
+  font-size: 9px;
+}
+.compart-membros {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+}
+.compart-avatares { display: inline-flex; }
+.compart-avatares i {
+  width: 24px; height: 24px; border-radius: 50%;
+  display: inline-grid; place-items: center;
+  font-style: normal; font-family: 'Space Mono', monospace;
+  font-size: 11px; font-weight: 700;
+  background: var(--ambar); color: #1a1305;
+  border: 2px solid var(--preto);
+  margin-left: -7px;
+}
+.compart-avatares i:first-child { margin-left: 0; }
+.compart-membros-txt {
+  font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+}
+.painel-lista { max-height: 100%; overflow-y: auto; }
+.renomear-linha {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.renomear-linha .conta-email { flex: 1; min-width: 0; }
+.renomear-campo {
+  flex: 1; min-width: 140px;
+  background: rgba(0,0,0,0.28);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 10px;
+  color: var(--branco);
+  font-family: 'Archivo', sans-serif; font-size: 16px; font-weight: 700;
+  padding: 9px 11px;
+}
+.membros-bloco {
+  border-top: 1px dashed rgba(255,255,255,0.16);
+  padding-top: 12px; margin-top: 4px;
+  display: grid; gap: 8px;
+}
+.membros-vazio {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.4);
+}
+.membros-lista { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.membro-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 8px; border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+}
+.membro-inicial {
+  width: 28px; height: 28px; border-radius: 50%; flex: none;
+  display: grid; place-items: center;
+  font-family: 'Space Mono', monospace; font-size: 12px; font-weight: 700;
+  background: var(--ambar); color: #1a1305;
+}
+.membro-nome {
+  flex: 1; min-width: 0;
+  font-size: 14px; color: var(--branco);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.membro-voce {
+  font-style: normal; margin-left: 6px;
+  font-family: 'Space Mono', monospace; font-size: 9px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(246,243,236,0.45);
+}
+.membro-tag {
+  font-family: 'Space Mono', monospace; font-size: 9px;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--luz); flex: none;
+}
+.membro-tirar {
+  flex: none; cursor: pointer;
+  font-family: 'Space Mono', monospace; font-size: 9px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: rgba(255,185,178,0.9);
+  background: none; border: 1px solid rgba(230,57,43,0.35);
+  padding: 5px 9px; border-radius: 999px;
+}
+.membro-tirar:hover { background: rgba(230,57,43,0.18); color: #fff; }
+.membros-aviso {
+  margin: 0; font-size: 12.5px; line-height: 1.5;
+  color: rgba(246,243,236,0.55);
+  border-top: 1px dashed rgba(255,255,255,0.16);
+  padding-top: 12px;
+}
+/* Opções de permissão (criar e gerenciar). */
+.perm-opcoes { display: grid; gap: 8px; }
+.perm-opcao {
+  text-align: left; cursor: pointer;
+  display: grid; gap: 2px;
+  padding: 11px 13px; border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.14);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.perm-opcao:hover { background: rgba(255,255,255,0.09); }
+.perm-opcao.ativa {
+  background: rgba(240,146,30,0.14);
+  border-color: rgba(240,146,30,0.55);
+}
+.perm-titulo {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--branco);
+}
+.perm-opcao.ativa .perm-titulo { color: var(--luz); }
+.perm-desc { font-size: 12px; color: rgba(246,243,236,0.55); }
+.conta-botao.perigo {
+  background: rgba(230,57,43,0.14);
+  border-color: rgba(230,57,43,0.4);
+  color: #ffb9b2;
+}
+.conta-botao.perigo:hover { background: rgba(230,57,43,0.24); color: #fff; }
 
 /* Painel de convite: código em destaque. */
 .convite-codigo {
