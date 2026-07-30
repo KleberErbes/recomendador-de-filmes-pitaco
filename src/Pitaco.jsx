@@ -414,6 +414,35 @@ function mesmasListas(a, b) {
   return true;
 }
 
+// ---- Cópia local das listas compartilhadas (só para aparecer na hora) ----
+// Guardamos a última versão conhecida por usuário. Ao abrir o site mostramos
+// essa cópia IMEDIATAMENTE e, em paralelo, buscamos a versão fresca no banco.
+// Sem isso a seção fica em branco por alguns segundos, esperando a rede.
+const CHAVE_COMPART = "pitaco-compart-";
+
+function lerCompartCache(uid) {
+  if (!uid) return [];
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const bruto = window.localStorage.getItem(CHAVE_COMPART + uid);
+      if (bruto) {
+        const dados = JSON.parse(bruto);
+        if (Array.isArray(dados)) return dados;
+      }
+    }
+  } catch (e) {}
+  return [];
+}
+
+function gravarCompartCache(uid, listas) {
+  if (!uid) return;
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(CHAVE_COMPART + uid, JSON.stringify(listas || []));
+    }
+  } catch (e) {}
+}
+
 function mesmaObra(a, b) {
   return (
     (a.titulo || "").trim().toLowerCase() === (b.titulo || "").trim().toLowerCase() &&
@@ -930,6 +959,9 @@ export default function Pitaco() {
   const [codigoEntrar, setCodigoEntrar] = useState("");
   const [erroCompart, setErroCompart] = useState("");
   const [ocupadoCompart, setOcupadoCompart] = useState(false);
+  // Falso até a primeira carga das compartilhadas terminar — serve para mostrar
+  // um esqueleto em vez de um espaço vazio sem explicação.
+  const [compartProntas, setCompartProntas] = useState(false);
   const [linkCopiado, setLinkCopiado] = useState(false);
   const [codigoCopiado, setCodigoCopiado] = useState(false);
   // Modal de criação: nome + quem pode editar.
@@ -1004,6 +1036,12 @@ export default function Pitaco() {
   // fechamento (closure) de um render antigo.
   const compartilhadasRef = useRef([]);
   compartilhadasRef.current = compartilhadas;
+
+  // Guarda a cópia local a cada mudança, para a próxima abertura do site já
+  // mostrar as listas na hora, sem esperar a rede.
+  useEffect(() => {
+    if (usuario) gravarCompartCache(usuario.id, compartilhadas);
+  }, [compartilhadas, usuario && usuario.id]);
 
   // Traz as listas da nuvem para este aparelho.
   //
@@ -1087,10 +1125,21 @@ export default function Pitaco() {
         return;
       }
 
-      // Logado: sincroniza com a nuvem (juntando o local nesta primeira carga).
-      await sincronizarComNuvem(usuario.id, true);
-      // Carrega as listas colaborativas e processa link de convite pendente.
-      await recarregarColaborativas(usuario.id);
+      // Mostra na HORA a última versão conhecida das listas compartilhadas,
+      // enquanto a versão fresca vem do banco. É isto que tira o espaço em
+      // branco de alguns segundos ao abrir o site.
+      const cache = lerCompartCache(usuario.id);
+      if (cache.length > 0 && compartilhadasRef.current.length === 0) {
+        setCompartilhadas(cache);
+      }
+
+      // As duas cargas correm JUNTAS. Antes, as compartilhadas só começavam
+      // depois das listas pessoais e das avaliações terminarem — três idas ao
+      // servidor em fila, e a seção ficava vazia esse tempo todo.
+      const pessoais = sincronizarComNuvem(usuario.id, true);
+      const colaborativas = recarregarColaborativas(usuario.id);
+      await Promise.all([pessoais, colaborativas]);
+
       const hash = typeof window !== "undefined" ? window.location.hash : "";
       const m = /#entrar=([A-Za-z0-9]+)/.exec(hash);
       if (m) {
@@ -1891,6 +1940,7 @@ Regras:
       }
 
       setCompartilhadas((prev) => (mesmasListas(prev, cs) ? prev : cs));
+      setCompartProntas(true);
       setErroCompart((e) => (e && e.startsWith("Não consegui carregar") ? "" : e));
       if (comMembros) carregarTodosMembros(cs);
       return cs;
@@ -3315,6 +3365,15 @@ Regras:
             <p className="compart-erro" data-revelar>{erroCompart}</p>
           )}
 
+          {listasLiberadas && !compartProntas && compartilhadas.length === 0 && (
+            <div className="compart-esqueleto" data-revelar aria-hidden="true">
+              <i className="ce-barra" />
+              <div className="ce-grade">
+                <i /><i /><i /><i />
+              </div>
+            </div>
+          )}
+
           {compartilhadas.length > 0 && (
             <div className="compart-lista" data-revelar>
               {compartilhadas.map((l) => (
@@ -3910,6 +3969,31 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 }
 .compart-grade { display: flex; flex-wrap: wrap; gap: 16px; }
 .compart-item { position: relative; width: 110px; }
+
+/* Esqueleto enquanto as listas compartilhadas carregam pela primeira vez —
+   melhor que um espaço vazio, que parece defeito. */
+.compart-esqueleto {
+  margin-top: 24px; padding: 18px 20px;
+  border-radius: 16px;
+  border: 1px solid rgba(240,146,30,0.18);
+  background: rgba(24,19,15,0.35);
+}
+.compart-esqueleto .ce-barra {
+  display: block; height: 26px; width: min(240px, 60%);
+  border-radius: 8px; margin-bottom: 16px;
+}
+.compart-esqueleto .ce-grade { display: flex; gap: 16px; flex-wrap: wrap; }
+.compart-esqueleto .ce-grade i {
+  display: block; width: 110px; aspect-ratio: 2 / 3; border-radius: 8px;
+}
+.compart-esqueleto i {
+  background: linear-gradient(120deg,
+    rgba(255,255,255,0.05) 30%,
+    rgba(255,255,255,0.11) 50%,
+    rgba(255,255,255,0.05) 70%);
+  background-size: 220% 100%;
+  animation: cintilar 1.3s linear infinite;
+}
 
 /* ---- membros, permissão e painel de gerenciar ---- */
 .compart-card-info { min-width: 0; }
