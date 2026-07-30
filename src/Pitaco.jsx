@@ -282,6 +282,113 @@ async function buscarObras(termo) {
   }
 }
 
+// ======================== JOGO: ADIVINHE A CENA =====================
+// Usa as imagens de divulgação (backdrops) do TMDB — as mesmas que a API
+// entrega oficialmente e que o app já credita no rodapé. Além de resolver a
+// questão de direitos, jogam melhor que pôsteres: são cenas sem o título
+// escrito em cima.
+const JOGO_RODADAS = 10;
+const JOGO_SEGUNDOS = 30;
+
+// Busca um acervo grande o bastante para montar rodadas com alternativas
+// variadas. Pega várias páginas de populares (filmes e séries).
+async function buscarAcervoJogo() {
+  if (!TMDB_ATIVO) return [];
+  const rotas = [];
+  for (let p = 1; p <= 3; p++) {
+    rotas.push("/api/tmdb?rota=movie/popular&language=pt-BR&page=" + p);
+    rotas.push("/api/tmdb?rota=tv/popular&language=pt-BR&page=" + p);
+  }
+  try {
+    const paginas = await Promise.all(
+      rotas.map((u) => fetch(u).then((r) => r.json()).catch(() => ({ results: [] })))
+    );
+    const juntos = paginas.flatMap((d) => d.results || []);
+    const vistos = new Set();
+    const acervo = [];
+    for (const r of juntos) {
+      const titulo = r.title || r.name;
+      if (!titulo || !r.backdrop_path) continue;
+      const chave = titulo.trim().toLowerCase();
+      if (vistos.has(chave)) continue;
+      vistos.add(chave);
+      acervo.push({
+        titulo,
+        ano: parseInt((r.release_date || r.first_air_date || "").slice(0, 4), 10) || null,
+        tipo: r.title ? "filme" : "série",
+        cena: "https://image.tmdb.org/t/p/w780" + r.backdrop_path,
+        poster: r.poster_path ? "https://image.tmdb.org/t/p/w342" + r.poster_path : null,
+      });
+    }
+    return acervo;
+  } catch (e) {
+    return [];
+  }
+}
+
+function embaralhar(lista) {
+  const a = [...lista];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Monta as rodadas: cada uma tem a obra certa e 3 alternativas erradas,
+// todas embaralhadas. Devolve [] se o acervo for pequeno demais.
+function montarRodadas(acervo, quantas) {
+  if (!Array.isArray(acervo) || acervo.length < 4) return [];
+  const baralho = embaralhar(acervo);
+  const total = Math.min(quantas, baralho.length);
+  const rodadas = [];
+  for (let i = 0; i < total; i++) {
+    const certa = baralho[i];
+    // Alternativas erradas: quaisquer outras, sem repetir título.
+    const erradas = [];
+    for (const cand of embaralhar(acervo)) {
+      if (erradas.length === 3) break;
+      if (cand.titulo === certa.titulo) continue;
+      if (erradas.some((e) => e.titulo === cand.titulo)) continue;
+      erradas.push(cand);
+    }
+    if (erradas.length < 3) continue;
+    rodadas.push({
+      obra: certa,
+      opcoes: embaralhar([certa, ...erradas]),
+    });
+  }
+  return rodadas;
+}
+
+// Pontos: acertar vale 100, mais um bônus por velocidade (até 100). Errar ou
+// deixar o tempo acabar vale 0.
+function pontosDaResposta(acertou, segundosRestantes, segundosTotais) {
+  if (!acertou) return 0;
+  const s = Math.max(0, Math.min(segundosRestantes, segundosTotais));
+  return 100 + Math.round(100 * (s / segundosTotais));
+}
+
+const CHAVE_RECORDE = "pitaco-jogo-recorde";
+
+function lerRecorde() {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      const v = parseInt(window.localStorage.getItem(CHAVE_RECORDE) || "0", 10);
+      return Number.isFinite(v) ? v : 0;
+    }
+  } catch (e) {}
+  return 0;
+}
+
+function gravarRecorde(pontos) {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(CHAVE_RECORDE, String(pontos));
+    }
+  } catch (e) {}
+}
+
 // ================== PREPARO DA IMAGEM (PRINT) ===================
 // Reduz para no máximo 1400px e converte para JPEG antes do envio.
 async function prepararImagem(arquivo) {
@@ -1067,6 +1174,20 @@ export default function Pitaco() {
   // --- Popover "salvar em" ---
   const [menuSalvar, setMenuSalvar] = useState(null);
 
+  // --- Jogo: adivinhe a cena ---
+  // fase: "menu" | "carregando" | "jogando" | "fim"
+  const [jogoAberto, setJogoAberto] = useState(false);
+  const [jogoFase, setJogoFase] = useState("menu");
+  const [jogoRodadas, setJogoRodadas] = useState([]);
+  const [jogoIndice, setJogoIndice] = useState(0);
+  const [jogoEscolha, setJogoEscolha] = useState(null);
+  const [jogoTempo, setJogoTempo] = useState(JOGO_SEGUNDOS);
+  const [jogoPontos, setJogoPontos] = useState(0);
+  const [jogoAcertos, setJogoAcertos] = useState(0);
+  const [jogoGanhos, setJogoGanhos] = useState(0);
+  const [jogoRecorde, setJogoRecorde] = useState(0);
+  const [jogoErro, setJogoErro] = useState("");
+
   // --- Pôsteres e parede ---
   const [posters, setPosters] = useState({});
   const [tendencias, setTendencias] = useState([]);
@@ -1393,6 +1514,15 @@ export default function Pitaco() {
     };
   }, []);
 
+  // Cronômetro da rodada: corre só enquanto está jogando e ninguém respondeu.
+  // Ao zerar, conta como resposta em branco (0 ponto) e mostra a certa.
+  useEffect(() => {
+    if (!jogoAberto || jogoFase !== "jogando" || jogoEscolha !== null) return;
+    if (jogoTempo <= 0) { responderJogo(null); return; }
+    const t = setTimeout(() => setJogoTempo((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [jogoAberto, jogoFase, jogoEscolha, jogoTempo]);
+
   // Contagem regressiva para poder pedir outro código (o servidor limita o
   // reenvio, então evitamos que a pessoa tente e receba erro).
   useEffect(() => {
@@ -1599,6 +1729,73 @@ export default function Pitaco() {
       cancelAnimationFrame(rafRol);
     };
   }, []);
+
+  // ------------------------- JOGO ------------------------------
+  function abrirJogo() {
+    setJogoRecorde(lerRecorde());
+    setJogoFase("menu");
+    setJogoErro("");
+    setJogoAberto(true);
+  }
+
+  function fecharJogo() {
+    setJogoAberto(false);
+    setJogoFase("menu");
+    setJogoRodadas([]);
+  }
+
+  async function comecarJogoSozinho() {
+    setJogoErro("");
+    setJogoFase("carregando");
+    const acervo = await buscarAcervoJogo();
+    const rodadas = montarRodadas(acervo, JOGO_RODADAS);
+    if (rodadas.length === 0) {
+      setJogoErro("Não consegui carregar as cenas agora. Tente de novo em alguns segundos.");
+      setJogoFase("menu");
+      return;
+    }
+    setJogoRodadas(rodadas);
+    setJogoIndice(0);
+    setJogoEscolha(null);
+    setJogoPontos(0);
+    setJogoAcertos(0);
+    setJogoGanhos(0);
+    setJogoTempo(JOGO_SEGUNDOS);
+    setJogoFase("jogando");
+  }
+
+  // Responde a rodada. indice = null significa que o tempo acabou.
+  function responderJogo(indice) {
+    if (jogoEscolha !== null) return; // já respondeu esta rodada
+    const rodada = jogoRodadas[jogoIndice];
+    if (!rodada) return;
+    const escolhida = indice === null ? null : rodada.opcoes[indice];
+    const acertou = Boolean(escolhida && escolhida.titulo === rodada.obra.titulo);
+    const ganhos = pontosDaResposta(acertou, jogoTempo, JOGO_SEGUNDOS);
+    setJogoEscolha(indice === null ? -1 : indice);
+    setJogoGanhos(ganhos);
+    if (acertou) {
+      setJogoPontos((p) => p + ganhos);
+      setJogoAcertos((a) => a + 1);
+    }
+  }
+
+  function proximaRodada() {
+    const proximo = jogoIndice + 1;
+    if (proximo >= jogoRodadas.length) {
+      // Fim: guarda o recorde se for o melhor até agora.
+      if (jogoPontos > lerRecorde()) {
+        gravarRecorde(jogoPontos);
+        setJogoRecorde(jogoPontos);
+      }
+      setJogoFase("fim");
+      return;
+    }
+    setJogoIndice(proximo);
+    setJogoEscolha(null);
+    setJogoGanhos(0);
+    setJogoTempo(JOGO_SEGUNDOS);
+  }
 
   // ------------------------- CONTA -----------------------------
   // As listas são o único recurso que exige conta. Descobrir, identificar e
@@ -2561,6 +2758,19 @@ Regras:
               <path d="M15.4 15.4 20 20" />
             </svg>
           </button>
+          <button
+            className="nav-botao"
+            onClick={abrirJogo}
+            title="Jogar: adivinhe a cena"
+            aria-label="Jogar: adivinhe a cena"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <rect x="2.5" y="7" width="19" height="10" rx="4" />
+              <path d="M7 10.5v3M5.5 12h3" />
+              <circle cx="16" cy="11.4" r="1" className="cheio" />
+              <circle cx="18.2" cy="13.4" r="1" className="cheio" />
+            </svg>
+          </button>
           {contaLigada && (
             <button
               className={"nav-botao" + (usuario ? " logado" : "")}
@@ -3276,6 +3486,141 @@ Regras:
           </div>
         </div>
       )}
+
+      {/* ===================== JOGO: ADIVINHE A CENA ==================== */}
+      {jogoAberto && (() => {
+        const rodada = jogoRodadas[jogoIndice];
+        const respondeu = jogoEscolha !== null;
+        const acertou = respondeu && jogoGanhos > 0;
+        return (
+          <div className="jogo-fundo" role="dialog" aria-modal="true" aria-label="Jogo: adivinhe a cena">
+            <div className="jogo-caixa">
+              <button className="jogo-fechar" onClick={fecharJogo} aria-label="Sair do jogo">×</button>
+
+              {/* --- Menu inicial --- */}
+              {jogoFase === "menu" && (
+                <div className="jogo-menu">
+                  <p className="jogo-olho">jogo do pitaco</p>
+                  <h2 className="jogo-titulo">Adivinhe<br />a cena</h2>
+                  <p className="jogo-texto">
+                    Aparece uma cena, você tem {JOGO_SEGUNDOS} segundos para dizer de
+                    qual filme ou série ela é. Quanto mais rápido acertar, mais pontos.
+                  </p>
+                  {jogoRecorde > 0 && (
+                    <p className="jogo-recorde">seu recorde: <strong>{jogoRecorde}</strong> pontos</p>
+                  )}
+                  {jogoErro && <p className="conta-erro">{jogoErro}</p>}
+                  <div className="jogo-opcoes-modo">
+                    <button className="botao-cheio" onClick={comecarJogoSozinho}>
+                      jogar sozinho
+                    </button>
+                    <button className="botao-vidro" disabled title="Em breve">
+                      jogar com amigos · em breve
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* --- Carregando as cenas --- */}
+              {jogoFase === "carregando" && (
+                <div className="jogo-menu">
+                  <p className="jogo-olho">preparando</p>
+                  <h2 className="jogo-titulo">Separando<br />as cenas…</h2>
+                  <div className="jogo-esqueleto" aria-hidden="true"><i /></div>
+                </div>
+              )}
+
+              {/* --- Partida --- */}
+              {jogoFase === "jogando" && rodada && (
+                <div className="jogo-partida">
+                  <header className="jogo-barra">
+                    <span className="jogo-rodada">
+                      {jogoIndice + 1}<i>/{jogoRodadas.length}</i>
+                    </span>
+                    <span className={"jogo-tempo" + (jogoTempo <= 5 && !respondeu ? " urgente" : "")}>
+                      {respondeu ? "—" : jogoTempo + "s"}
+                    </span>
+                    <span className="jogo-placar">{jogoPontos} pts</span>
+                  </header>
+
+                  <div className="jogo-trilho" aria-hidden="true">
+                    <i style={{ width: (jogoTempo / JOGO_SEGUNDOS) * 100 + "%" }} />
+                  </div>
+
+                  <figure className="jogo-cena">
+                    <img src={rodada.obra.cena} alt="Cena para adivinhar" />
+                  </figure>
+
+                  <div className="jogo-alternativas">
+                    {rodada.opcoes.map((o, i) => {
+                      const estaCerta = o.titulo === rodada.obra.titulo;
+                      let classe = "jogo-alt";
+                      if (respondeu) {
+                        if (estaCerta) classe += " certa";
+                        else if (jogoEscolha === i) classe += " errada";
+                        else classe += " apagada";
+                      }
+                      return (
+                        <button
+                          key={o.titulo + i}
+                          className={classe}
+                          onClick={() => responderJogo(i)}
+                          disabled={respondeu}
+                        >
+                          {o.titulo}
+                          {respondeu && estaCerta && <span className="jogo-marca">✓</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {respondeu && (
+                    <div className="jogo-resultado">
+                      <p className={"jogo-veredito" + (acertou ? " bom" : "")}>
+                        {acertou
+                          ? "acertou! +" + jogoGanhos + " pontos"
+                          : jogoEscolha === -1
+                          ? "o tempo acabou"
+                          : "não era essa"}
+                      </p>
+                      <p className="jogo-era">
+                        {rodada.obra.titulo}
+                        {rodada.obra.ano ? " · " + rodada.obra.ano : ""}
+                      </p>
+                      <button className="botao-cheio" onClick={proximaRodada}>
+                        {jogoIndice + 1 >= jogoRodadas.length ? "ver resultado" : "próxima cena"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* --- Fim de jogo --- */}
+              {jogoFase === "fim" && (
+                <div className="jogo-menu">
+                  <p className="jogo-olho">fim de jogo</p>
+                  <h2 className="jogo-titulo jogo-pontuacao">{jogoPontos}</h2>
+                  <p className="jogo-texto">
+                    Você acertou <strong>{jogoAcertos}</strong> de {jogoRodadas.length} cenas.
+                    {jogoPontos >= jogoRecorde && jogoPontos > 0 && " Novo recorde!"}
+                  </p>
+                  {jogoRecorde > 0 && (
+                    <p className="jogo-recorde">recorde: <strong>{jogoRecorde}</strong> pontos</p>
+                  )}
+                  <div className="jogo-opcoes-modo">
+                    <button className="botao-cheio" onClick={comecarJogoSozinho}>
+                      jogar de novo
+                    </button>
+                    <button className="botao-vidro" onClick={fecharJogo}>
+                      sair
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ========================= HERÓI ========================= */}
       <header className="heroi">
@@ -4351,6 +4696,158 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 /* Sobre fundo claro (papel), as estrelas vazias precisam de traço mais escuro. */
 .papel .estrela svg { stroke: rgba(23,20,15,0.35); }
 .papel .estrela.cheia svg { fill: #e0a740; stroke: #e0a740; }
+
+/* ==================== JOGO: ADIVINHE A CENA ================== */
+.jogo-fundo {
+  position: fixed; inset: 0; z-index: 140;
+  background: rgba(6,5,4,0.9);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+  animation: surgirFundo 0.22s ease both;
+}
+.jogo-caixa {
+  position: relative;
+  width: min(720px, 100%);
+  margin: auto;
+  padding: 30px 26px 26px;
+  border-radius: 22px;
+  background: linear-gradient(150deg, rgba(26,21,17,0.96), rgba(14,11,9,0.96));
+  border: 1px solid rgba(255,255,255,0.14);
+  box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+  animation: brotarBusca 0.28s cubic-bezier(0.2, 1.1, 0.3, 1) both;
+}
+.jogo-fechar {
+  position: absolute; top: 12px; right: 12px; z-index: 2;
+  width: 32px; height: 32px; border-radius: 999px;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.16);
+  color: rgba(246,243,236,0.7);
+  font-size: 20px; line-height: 1; cursor: pointer;
+}
+.jogo-fechar:hover { background: rgba(255,255,255,0.16); color: var(--branco); }
+
+.jogo-menu { display: grid; gap: 14px; text-align: center; justify-items: center; }
+.jogo-olho {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase;
+  color: var(--vermelho);
+}
+.jogo-titulo {
+  margin: 0; font-family: 'Archivo Black', sans-serif;
+  font-size: clamp(38px, 8vw, 66px); line-height: 0.86;
+  letter-spacing: -0.03em; text-transform: uppercase;
+  color: var(--branco);
+}
+.jogo-titulo.jogo-pontuacao { color: var(--luz); font-size: clamp(56px, 14vw, 104px); }
+.jogo-texto {
+  margin: 0; max-width: 420px;
+  font-size: 14.5px; line-height: 1.6;
+  color: rgba(246,243,236,0.68);
+}
+.jogo-recorde {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: rgba(246,243,236,0.5);
+}
+.jogo-recorde strong { color: var(--luz); }
+.jogo-opcoes-modo {
+  display: grid; gap: 10px; margin-top: 6px;
+  width: min(320px, 100%);
+}
+.jogo-opcoes-modo .botao-vidro:disabled { opacity: 0.45; cursor: default; }
+.jogo-esqueleto { width: min(420px, 100%); }
+.jogo-esqueleto i {
+  display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 12px;
+  background: linear-gradient(120deg,
+    rgba(255,255,255,0.05) 30%, rgba(255,255,255,0.12) 50%, rgba(255,255,255,0.05) 70%);
+  background-size: 220% 100%;
+  animation: cintilar 1.2s linear infinite;
+}
+
+/* --- partida --- */
+.jogo-partida { display: grid; gap: 14px; }
+.jogo-barra {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+  font-family: 'Space Mono', monospace;
+  font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.jogo-rodada { color: rgba(246,243,236,0.6); }
+.jogo-rodada i { font-style: normal; color: rgba(246,243,236,0.35); }
+.jogo-tempo {
+  font-size: 20px; font-weight: 700; letter-spacing: 0.04em;
+  color: var(--luz);
+}
+.jogo-tempo.urgente { color: var(--vermelho); animation: pulsoLuz 0.6s ease-in-out infinite; }
+.jogo-placar { color: var(--branco); }
+.jogo-trilho {
+  height: 4px; border-radius: 999px; overflow: hidden;
+  background: rgba(255,255,255,0.1);
+}
+.jogo-trilho i {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--vermelho), var(--ambar));
+  transition: width 1s linear;
+}
+.jogo-cena {
+  margin: 0; border-radius: 14px; overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: var(--preto2);
+  aspect-ratio: 16 / 9;
+}
+.jogo-cena img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.jogo-alternativas {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+}
+.jogo-alt {
+  position: relative;
+  padding: 15px 14px; border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.16);
+  color: var(--branco);
+  font-family: 'Archivo', sans-serif; font-weight: 700; font-size: 14.5px;
+  text-align: left; cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.1s ease;
+}
+.jogo-alt:hover:not(:disabled) {
+  background: rgba(255,255,255,0.13);
+  border-color: rgba(255,255,255,0.3);
+  transform: translateY(-1px);
+}
+.jogo-alt:disabled { cursor: default; }
+.jogo-alt.certa {
+  background: rgba(74,182,110,0.2);
+  border-color: rgba(74,182,110,0.65);
+  color: #d6f5de;
+}
+.jogo-alt.errada {
+  background: rgba(230,57,43,0.18);
+  border-color: rgba(230,57,43,0.6);
+  color: #ffd7d2;
+}
+.jogo-alt.apagada { opacity: 0.4; }
+.jogo-marca { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); }
+.jogo-resultado {
+  display: grid; gap: 8px; justify-items: center; text-align: center;
+  padding-top: 6px;
+}
+.jogo-veredito {
+  margin: 0; font-family: 'Space Mono', monospace;
+  font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #ffb9b2;
+}
+.jogo-veredito.bom { color: #9ee8b4; }
+.jogo-era { margin: 0; font-weight: 700; font-size: 17px; color: var(--branco); }
+.jogo-resultado .botao-cheio { margin-top: 6px; }
+
+@media (max-width: 560px) {
+  .jogo-caixa { padding: 26px 16px 20px; }
+  .jogo-alternativas { grid-template-columns: 1fr; }
+  .jogo-alt { padding: 13px 12px; font-size: 14px; }
+}
 
 /* ==================== PERFIL / CONFIGURAÇÕES ================= */
 .perfil-topo {
