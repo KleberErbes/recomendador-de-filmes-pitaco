@@ -814,13 +814,67 @@ function Estrelas({ nota, onAvaliar, onPrecisaConta, liberado }) {
   );
 }
 
+// Menu "salvar em": a pessoa MARCA as listas que quer e confirma no botão.
+// Antes cada clique aplicava na hora e havia um campo de criar lista aqui
+// dentro; agora a criação vive só na seção Listas, e aqui o clique é só
+// seleção — o que evita gravar sem querer ao explorar as opções.
 function BotaoSalvar({
   obra, listas, aberto, salvo,
-  onAbrir, onFechar, onAlternar, onCriar,
-  nomeNova, setNomeNova, variante,
-  compartilhadas, usuarioId, onAlternarCompart,
+  onAbrir, onFechar, onAplicar, variante,
+  compartilhadas,
 }) {
   const compart = compartilhadas || [];
+  const [marcadas, setMarcadas] = useState(() => new Set());
+  const [ocupado, setOcupado] = useState(false);
+
+  // Onde a obra já está hoje — serve de ponto de partida da seleção e para
+  // sabermos o que mudou na hora de aplicar.
+  const jaEstaEm = useMemo(() => {
+    const s = new Set();
+    listas.forEach((l) => {
+      if ((l.itens || []).some((i) => mesmaObra(i, obra))) s.add("p:" + l.id);
+    });
+    compart.forEach((l) => {
+      if ((l.itens || []).some((i) => mesmaObra(i, obra))) s.add("c:" + l.id);
+    });
+    return s;
+  }, [listas, compart, obra]);
+
+  // Ao abrir, a seleção começa refletindo onde a obra já está.
+  useEffect(() => {
+    if (aberto) { setMarcadas(new Set(jaEstaEm)); setOcupado(false); }
+  }, [aberto]);
+
+  function alternarMarca(chave) {
+    setMarcadas((prev) => {
+      const nova = new Set(prev);
+      if (nova.has(chave)) nova.delete(chave);
+      else nova.add(chave);
+      return nova;
+    });
+  }
+
+  // Quantas mudanças a pessoa fez (entradas + saídas).
+  const mudancas = useMemo(() => {
+    let n = 0;
+    marcadas.forEach((k) => { if (!jaEstaEm.has(k)) n++; });
+    jaEstaEm.forEach((k) => { if (!marcadas.has(k)) n++; });
+    return n;
+  }, [marcadas, jaEstaEm]);
+
+  async function aplicar() {
+    if (mudancas === 0 || ocupado) return;
+    setOcupado(true);
+    try {
+      await onAplicar(marcadas, jaEstaEm);
+      onFechar();
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  const temAlguma = listas.length > 0 || compart.length > 0;
+
   return (
     <div
       className={"salvar-wrap" + (variante === "inline" ? " inline" : "")}
@@ -838,21 +892,26 @@ function BotaoSalvar({
         <div className="menu-salvar vidro">
           <p className="menu-titulo">salvar em</p>
 
-          {listas.length === 0 && compart.length === 0 && (
-            <p className="menu-vazio">Você ainda não tem listas — crie a primeira abaixo.</p>
+          {!temAlguma && (
+            <p className="menu-vazio">
+              Você ainda não tem listas. Crie uma na seção “Suas listas”.
+            </p>
           )}
 
           {listas.map((l) => {
-            const dentro = l.itens.some((i) => mesmaObra(i, obra));
+            const chave = "p:" + l.id;
+            const marcada = marcadas.has(chave);
             return (
               <button
                 key={l.id}
-                className={"menu-lista" + (dentro ? " dentro" : "")}
-                onClick={() => onAlternar(l.id)}
+                className={"menu-lista" + (marcada ? " dentro" : "")}
+                onClick={() => alternarMarca(chave)}
+                role="checkbox"
+                aria-checked={marcada}
               >
-                <span className="menu-check">{dentro ? "✓" : ""}</span>
+                <span className="menu-check">{marcada ? "✓" : ""}</span>
                 <span className="menu-nome">{l.nome}</span>
-                <span className="menu-qtd">{l.itens.length}</span>
+                <span className="menu-qtd">{(l.itens || []).length}</span>
               </button>
             );
           })}
@@ -861,14 +920,17 @@ function BotaoSalvar({
             <>
               <p className="menu-subtitulo">compartilhadas</p>
               {compart.map((l) => {
-                const dentro = (l.itens || []).some((i) => mesmaObra(i, obra));
+                const chave = "c:" + l.id;
+                const marcada = marcadas.has(chave);
                 return (
                   <button
                     key={l.id}
-                    className={"menu-lista compart" + (dentro ? " dentro" : "")}
-                    onClick={() => onAlternarCompart(l)}
+                    className={"menu-lista compart" + (marcada ? " dentro" : "")}
+                    onClick={() => alternarMarca(chave)}
+                    role="checkbox"
+                    aria-checked={marcada}
                   >
-                    <span className="menu-check">{dentro ? "✓" : ""}</span>
+                    <span className="menu-check">{marcada ? "✓" : ""}</span>
                     <span className="menu-nome">{l.nome}</span>
                     <span className="menu-qtd">{(l.itens || []).length}</span>
                   </button>
@@ -877,17 +939,19 @@ function BotaoSalvar({
             </>
           )}
 
-          <div className="menu-nova">
-            <input
-              value={nomeNova}
-              placeholder="nova lista… ex.: com amigos"
-              onChange={(e) => setNomeNova(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); onCriar(); }
-              }}
-            />
-            <button onClick={onCriar}>criar</button>
-          </div>
+          {temAlguma && (
+            <button
+              className="menu-aplicar"
+              onClick={aplicar}
+              disabled={mudancas === 0 || ocupado}
+            >
+              {ocupado
+                ? "salvando…"
+                : mudancas === 0
+                ? "escolha uma lista"
+                : "adicionar" + (mudancas > 1 ? " (" + mudancas + ")" : "")}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -1002,7 +1066,6 @@ export default function Pitaco() {
 
   // --- Popover "salvar em" ---
   const [menuSalvar, setMenuSalvar] = useState(null);
-  const [nomeListaMenu, setNomeListaMenu] = useState("");
 
   // --- Pôsteres e parede ---
   const [posters, setPosters] = useState({});
@@ -2385,6 +2448,50 @@ Regras:
     return listas.some((l) => l.itens.some((i) => mesmaObra(i, obra)));
   }
 
+  // Aplica de uma vez as listas marcadas no menu: entra nas que foram
+  // marcadas, sai das que foram desmarcadas. Recebe conjuntos de chaves
+  // ("p:id" para lista pessoal, "c:id" para compartilhada).
+  async function aplicarSelecaoListas(obra, marcadas, jaEstavaEm) {
+    // Pessoais: dá para resolver tudo numa atualização só do estado.
+    const entrarP = [];
+    const sairP = [];
+    listas.forEach((l) => {
+      const chave = "p:" + l.id;
+      const estava = jaEstavaEm.has(chave);
+      const quer = marcadas.has(chave);
+      if (quer && !estava) entrarP.push(l.id);
+      if (!quer && estava) sairP.push(l.id);
+    });
+
+    if (entrarP.length || sairP.length) {
+      setListas((prev) =>
+        prev.map((l) => {
+          if (entrarP.includes(l.id)) {
+            if (l.itens.some((i) => mesmaObra(i, obra))) return l;
+            return { ...l, itens: [...l.itens, paraItem(obra)] };
+          }
+          if (sairP.includes(l.id)) {
+            return { ...l, itens: l.itens.filter((i) => !mesmaObra(i, obra)) };
+          }
+          return l;
+        })
+      );
+    }
+
+    // Compartilhadas: cada uma vai ao banco, uma operação por lista.
+    for (const l of compartilhadas) {
+      const chave = "c:" + l.id;
+      const estava = jaEstavaEm.has(chave);
+      const quer = marcadas.has(chave);
+      if (quer === estava) continue;
+      try {
+        await alternarNaColaborativa(l, obra);
+      } catch (e) {
+        setErroCompart(String(e.message || e));
+      }
+    }
+  }
+
   function propsSalvar(chaveCard, obra) {
     return {
       obra,
@@ -2392,23 +2499,14 @@ Regras:
       // Só oferecemos as compartilhadas em que esta pessoa pode mesmo editar —
       // mostrar uma lista "só leitura" no menu levaria a um clique que falha.
       compartilhadas: compartilhadas.filter((l) => podeEditar(l)),
-      usuarioId: usuario ? usuario.id : null,
       aberto: menuSalvar === chaveCard,
       salvo: obraSalva(obra),
       onAbrir: () => {
         if (precisaDeConta("Crie uma conta para guardar este título numa lista.")) return;
         setMenuSalvar(chaveCard);
-        setNomeListaMenu("");
       },
-      onFechar: () => { setMenuSalvar(null); setNomeListaMenu(""); },
-      onAlternar: (listaId) => alternarNaLista(listaId, obra),
-      onAlternarCompart: (lista) => alternarNaColaborativa(lista, obra),
-      onCriar: () => {
-        const id = criarLista(nomeListaMenu, obra);
-        if (id) setNomeListaMenu("");
-      },
-      nomeNova: nomeListaMenu,
-      setNomeNova: setNomeListaMenu,
+      onFechar: () => setMenuSalvar(null),
+      onAplicar: (marcadas, jaEstavaEm) => aplicarSelecaoListas(obra, marcadas, jaEstavaEm),
     };
   }
 
@@ -5601,29 +5699,21 @@ tbody:first-of-type .linha td { border-top: none; }
   font-family: 'Space Mono', monospace; font-size: 10px;
   color: rgba(246,243,236,0.5);
 }
-.menu-nova {
-  display: flex; gap: 6px;
+/* Botão que confirma as listas marcadas. */
+.menu-aplicar {
+  width: 100%;
   margin-top: 10px; padding-top: 10px;
   border-top: 1px dashed rgba(255,255,255,0.16);
+  border-left: none; border-right: none; border-bottom: none;
+  background: none; cursor: pointer;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--vermelho);
+  padding-bottom: 4px;
+  transition: color 0.18s ease;
 }
-.menu-nova input {
-  flex: 1; min-width: 0;
-  font: inherit; font-size: 13px;
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(255,255,255,0.16);
-  color: var(--branco);
-  border-radius: 8px; padding: 8px 10px;
-  outline: none;
-}
-.menu-nova input::placeholder { color: rgba(246,243,236,0.4); }
-.menu-nova input:focus { border-color: rgba(230,57,43,0.6); }
-.menu-nova button {
-  font-family: 'Archivo', sans-serif; font-weight: 700;
-  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
-  padding: 8px 12px; border-radius: 8px;
-  border: none; background: var(--vermelho); color: #fff;
-  cursor: pointer;
-}
+.menu-aplicar:hover:not(:disabled) { color: #ff6a5c; }
+.menu-aplicar:disabled { color: rgba(246,243,236,0.35); cursor: default; }
 
 /* ======================= SUAS LISTAS ========================= */
 .console.nova-lista {
