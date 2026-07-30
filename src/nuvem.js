@@ -310,17 +310,42 @@ export async function carregarCompartilhadas() {
     if (erroRenova || !nova || !nova.session) return null;
   }
 
-  const { data, error } = await supabase
+  // 3) Busca pela função do banco, que confere a filiação por dentro. É o
+  //    caminho confiável: não depende da política de leitura da tabela, que
+  //    estava deixando as listas sumirem ao recarregar a página.
+  const { data, error } = await supabase.rpc("minhas_listas_compartilhadas");
+
+  if (!error) {
+    const listas = data || [];
+    if (listas.length === 0) {
+      // Confirma que a sessão vale mesmo antes de afirmar "não tem listas".
+      try {
+        const { data: u, error: erroUser } = await supabase.auth.getUser();
+        if (erroUser || !u || !u.user) return null;
+      } catch (e) {
+        return null;
+      }
+    }
+    return listas;
+  }
+
+  // 4) Reserva: se a função ainda não existe no banco (SQL v4 não rodado),
+  //    tenta o caminho antigo para o app não ficar sem listas.
+  const semFuncao =
+    error.code === "PGRST202" ||
+    /could not find the function|does not exist/i.test(error.message || "");
+  if (!semFuncao) {
+    throw new Error("Não consegui carregar as listas compartilhadas: " + error.message);
+  }
+
+  const { data: dados2, error: erro2 } = await supabase
     .from("listas_compartilhadas")
     .select("*")
     .order("criado_em", { ascending: true });
-  if (error) throw new Error("Não consegui carregar as listas compartilhadas: " + error.message);
+  if (erro2) throw new Error("Não consegui carregar as listas compartilhadas: " + erro2.message);
 
-  const listas = data || [];
-
-  // 3) Veio vazio? Antes de afirmar "você não tem listas", confirmamos com o
-  //    servidor que a sessão é válida mesmo. Se não for, o vazio era falso.
-  if (listas.length === 0) {
+  const listas2 = dados2 || [];
+  if (listas2.length === 0) {
     try {
       const { data: u, error: erroUser } = await supabase.auth.getUser();
       if (erroUser || !u || !u.user) return null;
@@ -328,8 +353,7 @@ export async function carregarCompartilhadas() {
       return null;
     }
   }
-
-  return listas;
+  return listas2;
 }
 
 // Quem participa de uma lista. Devolve [{ user_id, apelido, entrou_em, e_dono }].
