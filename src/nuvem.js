@@ -285,17 +285,29 @@ export async function entrarPorCodigo(codigo) {
 // Todas as listas compartilhadas de que sou membro (a política de leitura já
 // filtra: só volta o que é meu).
 //
-// Importante: exigimos uma sessão válida ANTES de consultar. Logo depois de um
-// F5 o token pode estar sendo renovado; se a consulta sair nesse instante, o
-// banco não reconhece o usuário e devolve uma lista VAZIA — sem erro nenhum. O
-// app entenderia "você não tem listas" e limparia a tela. Preferimos avisar que
-// a sessão não está pronta, e quem chamou mantém o que já estava aparecendo.
+// Devolve:
+//   • um array  → resultado confiável (pode estar vazio de verdade)
+//   • null      → NÃO deu para confiar (sessão indisponível/expirada). Quem
+//                 chamou deve manter o que já está na tela.
+//
+// Por que essa distinção existe: se o token estiver expirado ou renovando, o
+// banco não reconhece o usuário e a consulta volta VAZIA sem erro nenhum. Sem
+// separar "vazio de verdade" de "não consegui saber", o app apagava as listas
+// da tela achando que a pessoa não tinha nenhuma.
 export async function carregarCompartilhadas() {
   if (!supabase) return [];
 
+  // 1) Garante um token válido antes de perguntar. getSession() renova sozinho
+  //    quando está perto de expirar.
   const { data: s } = await supabase.auth.getSession();
-  if (!s || !s.session) {
-    throw new Error("sessao-indisponivel");
+  const sessao = s && s.session;
+  if (!sessao) return null;
+
+  // 2) Se o token já venceu, força a renovação antes de consultar.
+  const agora = Math.floor(Date.now() / 1000);
+  if (sessao.expires_at && sessao.expires_at <= agora + 5) {
+    const { data: nova, error: erroRenova } = await supabase.auth.refreshSession();
+    if (erroRenova || !nova || !nova.session) return null;
   }
 
   const { data, error } = await supabase
@@ -303,7 +315,21 @@ export async function carregarCompartilhadas() {
     .select("*")
     .order("criado_em", { ascending: true });
   if (error) throw new Error("Não consegui carregar as listas compartilhadas: " + error.message);
-  return data || [];
+
+  const listas = data || [];
+
+  // 3) Veio vazio? Antes de afirmar "você não tem listas", confirmamos com o
+  //    servidor que a sessão é válida mesmo. Se não for, o vazio era falso.
+  if (listas.length === 0) {
+    try {
+      const { data: u, error: erroUser } = await supabase.auth.getUser();
+      if (erroUser || !u || !u.user) return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  return listas;
 }
 
 // Quem participa de uma lista. Devolve [{ user_id, apelido, entrou_em, e_dono }].

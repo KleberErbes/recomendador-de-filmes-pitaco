@@ -1000,9 +1000,10 @@ export default function Pitaco() {
   const envioPendenteRef = useRef(false);
   // Marca que "avaliacoes" acabou de vir da nuvem (evita regravar na hora).
   const avaliacoesDaNuvemRef = useRef(false);
-  // Quantas leituras vazias seguidas das listas compartilhadas — usamos para não
-  // limpar a tela por causa de um único resultado vazio momentâneo.
-  const vaziosSeguidosRef = useRef(0);
+  // Sempre com as compartilhadas atuais, para diagnósticos sem depender de
+  // fechamento (closure) de um render antigo.
+  const compartilhadasRef = useRef([]);
+  compartilhadasRef.current = compartilhadas;
 
   // Traz as listas da nuvem para este aparelho.
   //
@@ -1869,31 +1870,32 @@ Regras:
   // comMembros=false é usado pela checagem periódica: só as listas, sem uma
   // consulta de membros por lista — mantém a verificação frequente barata.
   async function recarregarColaborativas(uid, comMembros = true) {
-    if (!uid) { setCompartilhadas([]); setMembrosPorLista({}); return []; }
+    if (!uid) { setCompartilhadas([]); setMembrosPorLista({}); return null; }
     try {
       const cs = await carregarCompartilhadas();
-      setCompartilhadas((prev) => {
-        if (mesmasListas(prev, cs)) { vaziosSeguidosRef.current = 0; return prev; }
-        // Veio vazio mas havia listas na tela? Pode ser um tropeço momentâneo
-        // (token renovando logo após o F5). Só limpamos depois de duas leituras
-        // vazias seguidas — assim uma lista real apagada some, mas um vazio
-        // falso não faz a tela piscar e "perder" tudo.
-        if (cs.length === 0 && prev.length > 0) {
-          vaziosSeguidosRef.current += 1;
-          if (vaziosSeguidosRef.current < 2) return prev;
-        }
-        vaziosSeguidosRef.current = 0;
-        return cs;
-      });
+
+      // null = não deu para confiar na resposta (sessão renovando, token
+      // vencido). Mantemos a tela como está e tentamos de novo no próximo ciclo.
+      if (cs === null) return null;
+
+      // Diagnóstico: se o servidor confirma a sessão e ainda assim não devolve
+      // nenhuma lista que estava na tela, o problema é no banco (a filiação da
+      // pessoa nessa lista não está valendo para a leitura). Deixamos o aviso
+      // explícito para não voltar a ser um sumiço misterioso.
+      if (cs.length === 0 && compartilhadasRef.current.length > 0) {
+        console.warn(
+          "[Pitaco] O servidor confirmou a sessão mas não devolveu nenhuma lista " +
+          "compartilhada, embora houvesse " + compartilhadasRef.current.length +
+          " na tela. Isso indica que a filiação no banco não está valendo para a leitura."
+        );
+      }
+
+      setCompartilhadas((prev) => (mesmasListas(prev, cs) ? prev : cs));
       setErroCompart((e) => (e && e.startsWith("Não consegui carregar") ? "" : e));
       if (comMembros) carregarTodosMembros(cs);
       return cs;
     } catch (e) {
-      const msg = String(e.message || e);
-      // Sessão ainda não pronta: não é erro para mostrar, e principalmente não
-      // mexemos no que já está na tela. A próxima verificação resolve.
-      if (msg.includes("sessao-indisponivel")) return null;
-      setErroCompart("Não consegui carregar as listas: " + msg);
+      setErroCompart("Não consegui carregar as listas: " + String(e.message || e));
       console.error("[Pitaco] Falha ao carregar colaborativas:", e);
       return null;
     }
