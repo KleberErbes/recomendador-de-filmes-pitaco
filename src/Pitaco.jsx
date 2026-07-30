@@ -7,6 +7,7 @@ import {
   criarConta,
   sair as sairDaConta,
   recuperarSenha,
+  entrarComProvedor,
   verificarCodigo,
   reenviarCodigo,
   carregarListasDaNuvem,
@@ -1604,6 +1605,20 @@ export default function Pitaco() {
     }
   }
 
+  // Entra por Google (ou outro provedor que venha a ser ligado).
+  async function entrarPor(provedor) {
+    setErroConta("");
+    setAvisoConta("");
+    setOcupadoConta(true);
+    try {
+      await entrarComProvedor(provedor);
+      // A partir daqui o navegador sai da página; ao voltar já vem logado.
+    } catch (e) {
+      setErroConta(String(e.message || e));
+      setOcupadoConta(false);
+    }
+  }
+
   // Confere o código de 6 números que chegou por e-mail.
   async function confirmarCodigo() {
     const limpo = (codigoConta || "").replace(/\D/g, "");
@@ -2868,6 +2883,24 @@ Regras:
                   </button>
                 </div>
 
+                <button
+                  className="botao-provedor"
+                  onClick={() => entrarPor("google")}
+                  disabled={ocupadoConta}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className="prov-icone">
+                    <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.4a5.5 5.5 0 0 1-2.4 3.6v3h3.9c2.2-2.1 3.6-5.2 3.6-8.8z"/>
+                    <path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-3l-3.9-3c-1.1.7-2.5 1.2-4.1 1.2-3.1 0-5.8-2.1-6.7-5H1.2v3.1A12 12 0 0 0 12 24z"/>
+                    <path fill="#FBBC05" d="M5.3 14.2a7.2 7.2 0 0 1 0-4.6V6.5H1.2a12 12 0 0 0 0 10.8l4.1-3.1z"/>
+                    <path fill="#EA4335" d="M12 4.8c1.8 0 3.3.6 4.6 1.8l3.4-3.4A12 12 0 0 0 1.2 6.5l4.1 3.1C6.2 6.9 8.9 4.8 12 4.8z"/>
+                  </svg>
+                  continuar com Google
+                </button>
+
+                <div className="conta-ou" aria-hidden="true">
+                  <span>ou com e-mail</span>
+                </div>
+
                 {motivoConta ? (
                   <p className="conta-motivo">{motivoConta}</p>
                 ) : (
@@ -3558,7 +3591,8 @@ Regras:
                           {podeEditar(l) && (
                             <button
                               className="pi-remover"
-                              aria-label={"Remover " + item.titulo}
+                              aria-label={"Remover " + item.titulo + " da lista compartilhada"}
+                              title={"Remover " + item.titulo + " — sai para todos os membros"}
                               onClick={() => removerDaColaborativa(l, item.id)}
                             >
                               ×
@@ -4002,6 +4036,37 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 /* Sobre fundo claro (papel), as estrelas vazias precisam de traço mais escuro. */
 .papel .estrela svg { stroke: rgba(23,20,15,0.35); }
 .papel .estrela.cheia svg { fill: #e0a740; stroke: #e0a740; }
+
+/* Botão de entrar por provedor externo (Google). Fundo claro porque é o
+   padrão que as pessoas reconhecem nesses botões. */
+.botao-provedor {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%;
+  font-family: 'Archivo', sans-serif; font-weight: 700;
+  font-size: 14px;
+  color: #1f1b16;
+  background: var(--branco);
+  border: 1px solid var(--branco);
+  padding: 13px; border-radius: 999px; cursor: pointer;
+  transition: filter 0.18s ease, transform 0.1s ease;
+}
+.botao-provedor:hover:not(:disabled) { filter: brightness(0.94); transform: translateY(-1px); }
+.botao-provedor:disabled { opacity: 0.6; cursor: default; }
+.prov-icone { width: 18px; height: 18px; flex: none; }
+/* Separador "ou com e-mail" com linhas dos dois lados. */
+.conta-ou {
+  display: flex; align-items: center; gap: 12px;
+  margin: 2px 0;
+}
+.conta-ou::before, .conta-ou::after {
+  content: ""; flex: 1; height: 1px;
+  background: rgba(255,255,255,0.16);
+}
+.conta-ou span {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: rgba(246,243,236,0.4);
+}
 
 /* Campo do código de confirmação: números grandes e espaçados, fáceis de
    conferir com o e-mail aberto do lado. */
@@ -5448,8 +5513,14 @@ tbody:first-of-type .linha td { border-top: none; }
   opacity: 0; transform: scale(0.7);
   transition: all 0.2s ease;
 }
+/* O botão "×" aparece ao passar o mouse (ou sempre, no toque). Precisa cobrir
+   TANTO as listas pessoais quanto as compartilhadas: como os itens de cada uma
+   usam classes diferentes, faltando uma delas o botão existia mas ficava
+   invisível no computador — parecia que não dava para excluir. */
 .prat-item:hover .pi-remover,
-.prat-item:focus-within .pi-remover { opacity: 1; transform: scale(1); }
+.prat-item:focus-within .pi-remover,
+.compart-item:hover .pi-remover,
+.compart-item:focus-within .pi-remover { opacity: 1; transform: scale(1); }
 .pi-remover:hover { background: var(--vermelho); border-color: var(--vermelho); }
 @media (pointer: coarse) { .pi-remover { opacity: 1; transform: none; } }
 

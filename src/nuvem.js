@@ -119,6 +119,26 @@ export async function sair() {
   try { await supabase.auth.signOut(); } catch (e) {}
 }
 
+// Entra por um provedor externo (Google hoje; Apple e outros entram aqui sem
+// mudar mais nada, bastando ligar o provedor no painel do Supabase).
+// A pessoa sai do site, autentica lá, e volta já logada — o supabase-js lê a
+// sessão do endereço de retorno sozinho.
+export async function entrarComProvedor(provedor) {
+  if (!supabase) throw new Error("Conta indisponível: configure o Supabase.");
+  const voltarPara =
+    typeof window !== "undefined" ? window.location.origin : undefined;
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: provedor,
+    options: {
+      redirectTo: voltarPara,
+      // Pede a tela de escolha de conta — evita entrar direto com uma conta
+      // antiga sem a pessoa perceber.
+      queryParams: provedor === "google" ? { prompt: "select_account" } : undefined,
+    },
+  });
+  if (error) throw new Error(traduzErro(error.message));
+}
+
 // Confere o código de 6 dígitos que chegou por e-mail ao criar a conta.
 // Dando certo, a pessoa já entra (o Supabase devolve a sessão).
 export async function verificarCodigo(email, codigo) {
