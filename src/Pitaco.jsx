@@ -1000,6 +1000,9 @@ export default function Pitaco() {
   const envioPendenteRef = useRef(false);
   // Marca que "avaliacoes" acabou de vir da nuvem (evita regravar na hora).
   const avaliacoesDaNuvemRef = useRef(false);
+  // Quantas leituras vazias seguidas das listas compartilhadas — usamos para não
+  // limpar a tela por causa de um único resultado vazio momentâneo.
+  const vaziosSeguidosRef = useRef(0);
 
   // Traz as listas da nuvem para este aparelho.
   //
@@ -1869,16 +1872,30 @@ Regras:
     if (!uid) { setCompartilhadas([]); setMembrosPorLista({}); return []; }
     try {
       const cs = await carregarCompartilhadas();
-      // Só mexe no estado se algo mudou de verdade. Sem isto, a verificação a
-      // cada 4s criaria um array novo sempre e re-renderizaria a página inteira
-      // sem necessidade (some com o foco de campos, pisca a tela).
-      setCompartilhadas((prev) => (mesmasListas(prev, cs) ? prev : cs));
+      setCompartilhadas((prev) => {
+        if (mesmasListas(prev, cs)) { vaziosSeguidosRef.current = 0; return prev; }
+        // Veio vazio mas havia listas na tela? Pode ser um tropeço momentâneo
+        // (token renovando logo após o F5). Só limpamos depois de duas leituras
+        // vazias seguidas — assim uma lista real apagada some, mas um vazio
+        // falso não faz a tela piscar e "perder" tudo.
+        if (cs.length === 0 && prev.length > 0) {
+          vaziosSeguidosRef.current += 1;
+          if (vaziosSeguidosRef.current < 2) return prev;
+        }
+        vaziosSeguidosRef.current = 0;
+        return cs;
+      });
+      setErroCompart((e) => (e && e.startsWith("Não consegui carregar") ? "" : e));
       if (comMembros) carregarTodosMembros(cs);
       return cs;
     } catch (e) {
-      setErroCompart("Não consegui carregar as listas: " + String(e.message || e));
+      const msg = String(e.message || e);
+      // Sessão ainda não pronta: não é erro para mostrar, e principalmente não
+      // mexemos no que já está na tela. A próxima verificação resolve.
+      if (msg.includes("sessao-indisponivel")) return null;
+      setErroCompart("Não consegui carregar as listas: " + msg);
       console.error("[Pitaco] Falha ao carregar colaborativas:", e);
-      return [];
+      return null;
     }
   }
 

@@ -284,8 +284,20 @@ export async function entrarPorCodigo(codigo) {
 
 // Todas as listas compartilhadas de que sou membro (a política de leitura já
 // filtra: só volta o que é meu).
+//
+// Importante: exigimos uma sessão válida ANTES de consultar. Logo depois de um
+// F5 o token pode estar sendo renovado; se a consulta sair nesse instante, o
+// banco não reconhece o usuário e devolve uma lista VAZIA — sem erro nenhum. O
+// app entenderia "você não tem listas" e limparia a tela. Preferimos avisar que
+// a sessão não está pronta, e quem chamou mantém o que já estava aparecendo.
 export async function carregarCompartilhadas() {
   if (!supabase) return [];
+
+  const { data: s } = await supabase.auth.getSession();
+  if (!s || !s.session) {
+    throw new Error("sessao-indisponivel");
+  }
+
   const { data, error } = await supabase
     .from("listas_compartilhadas")
     .select("*")
