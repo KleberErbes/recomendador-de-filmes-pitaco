@@ -114,6 +114,63 @@ export async function criarConta(email, senha) {
   };
 }
 
+// Nome de exibição da pessoa (guardado junto da conta, sem tabela nova).
+// Cai para o começo do e-mail quando ainda não escolheram um nome.
+export function nomeDoUsuario(usuario) {
+  if (!usuario) return "";
+  const meta = usuario.user_metadata || {};
+  const nome = (meta.nome || "").trim();
+  if (nome) return nome;
+  return (usuario.email || "").split("@")[0];
+}
+
+// Quem entrou pelo Google não tem senha no Pitaco — para essas contas não faz
+// sentido mostrar "trocar senha".
+export function temSenha(usuario) {
+  if (!usuario) return false;
+  const ids = Array.isArray(usuario.identities) ? usuario.identities : [];
+  if (ids.length > 0) return ids.some((i) => i.provider === "email");
+  // Sem a lista de identidades, cai no provedor principal.
+  const meta = usuario.app_metadata || {};
+  return (meta.provider || "email") === "email";
+}
+
+export async function atualizarNome(nome) {
+  if (!supabase) throw new Error("Conta indisponível.");
+  const limpo = (nome || "").trim().slice(0, 40);
+  if (!limpo) throw new Error("Escreva um nome.");
+  const { data, error } = await supabase.auth.updateUser({ data: { nome: limpo } });
+  if (error) throw new Error(traduzErro(error.message));
+  return data.user || null;
+}
+
+// Troca a senha. Pedimos a senha atual e conferimos antes: sem isso, quem
+// pegasse o aparelho destrancado poderia trocar a senha e tomar a conta.
+export async function atualizarSenha(email, senhaAtual, novaSenha) {
+  if (!supabase) throw new Error("Conta indisponível.");
+  if ((novaSenha || "").length < 6) {
+    throw new Error("A nova senha precisa ter pelo menos 6 caracteres.");
+  }
+  if (senhaAtual === novaSenha) {
+    throw new Error("A nova senha é igual à atual.");
+  }
+
+  const { error: erroConfere } = await supabase.auth.signInWithPassword({
+    email: (email || "").trim(),
+    password: senhaAtual || "",
+  });
+  if (erroConfere) {
+    const m = (erroConfere.message || "").toLowerCase();
+    if (m.includes("invalid login credentials")) {
+      throw new Error("A senha atual está incorreta.");
+    }
+    throw new Error(traduzErro(erroConfere.message));
+  }
+
+  const { error } = await supabase.auth.updateUser({ password: novaSenha });
+  if (error) throw new Error(traduzErro(error.message));
+}
+
 export async function sair() {
   if (!supabase) return;
   try { await supabase.auth.signOut(); } catch (e) {}

@@ -8,6 +8,10 @@ import {
   sair as sairDaConta,
   recuperarSenha,
   entrarComProvedor,
+  nomeDoUsuario,
+  temSenha,
+  atualizarNome,
+  atualizarSenha,
   verificarCodigo,
   reenviarCodigo,
   carregarListasDaNuvem,
@@ -922,6 +926,14 @@ export default function Pitaco() {
   const [codigoConta, setCodigoConta] = useState("");
   const [emailPendente, setEmailPendente] = useState("");
   const [segundosReenvio, setSegundosReenvio] = useState(0);
+  // --- Configurações do perfil ---
+  const [nomePerfil, setNomePerfil] = useState("");
+  const [editandoNome, setEditandoNome] = useState(false);
+  const [trocandoSenha, setTrocandoSenha] = useState(false);
+  const [senhaAtual, setSenhaAtual] = useState("");
+  const [senhaNova, setSenhaNova] = useState("");
+  const [senhaConfere, setSenhaConfere] = useState("");
+  const [okPerfil, setOkPerfil] = useState("");
   const [sincronizando, setSincronizando] = useState(false);
   // Guarda o motivo quando a nuvem falha, para avisarmos na tela em vez de
   // deixar a pessoa achando que a sincronização "simplesmente não funciona".
@@ -1603,6 +1615,81 @@ export default function Pitaco() {
     } finally {
       setOcupadoConta(false);
     }
+  }
+
+  // ---- Configurações do perfil ----
+  async function salvarNome() {
+    const limpo = nomePerfil.trim();
+    setErroConta("");
+    setOkPerfil("");
+    if (!limpo) {
+      setErroConta("Escreva um nome.");
+      return;
+    }
+    setOcupadoConta(true);
+    try {
+      const atualizado = await atualizarNome(limpo);
+      // Reflete na hora, sem esperar a sessão ser recarregada.
+      if (atualizado) {
+        setSessao((s) => (s ? { ...s, user: atualizado } : s));
+      }
+      setEditandoNome(false);
+      setOkPerfil("Nome salvo.");
+      // Atualiza o nome nas listas compartilhadas que estão na tela.
+      if (usuario) carregarTodosMembros(compartilhadasRef.current);
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  async function salvarSenha() {
+    setErroConta("");
+    setOkPerfil("");
+    if (!senhaAtual || !senhaNova) {
+      setErroConta("Preencha a senha atual e a nova.");
+      return;
+    }
+    if (senhaNova.length < 6) {
+      setErroConta("A nova senha precisa ter pelo menos 6 caracteres.");
+      return;
+    }
+    if (senhaNova !== senhaConfere) {
+      setErroConta("A confirmação não bate com a nova senha.");
+      return;
+    }
+    setOcupadoConta(true);
+    try {
+      await atualizarSenha(usuario.email, senhaAtual, senhaNova);
+      setTrocandoSenha(false);
+      setSenhaAtual("");
+      setSenhaNova("");
+      setSenhaConfere("");
+      setOkPerfil("Senha alterada.");
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  function abrirEdicaoNome() {
+    setNomePerfil(nomeDoUsuario(usuario));
+    setEditandoNome(true);
+    setTrocandoSenha(false);
+    setErroConta("");
+    setOkPerfil("");
+  }
+
+  function abrirTrocaSenha() {
+    setTrocandoSenha(true);
+    setEditandoNome(false);
+    setSenhaAtual("");
+    setSenhaNova("");
+    setSenhaConfere("");
+    setErroConta("");
+    setOkPerfil("");
   }
 
   // Entra por Google (ou outro provedor que venha a ser ligado).
@@ -2797,15 +2884,145 @@ Regras:
 
             {usuario ? (
               <>
-                <p className="conta-etiqueta">conectado como</p>
-                <p className="conta-email">{usuario.email}</p>
-                <p className="conta-texto">
-                  Suas listas estão salvas na sua conta — é só entrar em outro
-                  aparelho para encontrá-las lá.
-                </p>
-                <button className="conta-botao" onClick={sairELimpar}>
-                  sair da conta
-                </button>
+                <div className="perfil-topo">
+                  <span className="perfil-inicial" aria-hidden="true">
+                    {(nomeDoUsuario(usuario) || "?").charAt(0).toUpperCase()}
+                  </span>
+                  <div className="perfil-id">
+                    <p className="perfil-nome">{nomeDoUsuario(usuario)}</p>
+                    <p className="perfil-email">{usuario.email}</p>
+                  </div>
+                </div>
+
+                {okPerfil && <p className="conta-ok">{okPerfil}</p>}
+                {erroConta && <p className="conta-erro">{erroConta}</p>}
+
+                {/* Nome */}
+                {editandoNome ? (
+                  <div className="perfil-bloco">
+                    <label className="conta-campo">
+                      <span>seu nome</span>
+                      <input
+                        type="text"
+                        value={nomePerfil}
+                        onChange={(e) => setNomePerfil(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !ocupadoConta) salvarNome();
+                          if (e.key === "Escape") setEditandoNome(false);
+                        }}
+                        placeholder="como você quer aparecer"
+                        maxLength={40}
+                        autoFocus
+                      />
+                    </label>
+                    <div className="perfil-acoes">
+                      <button
+                        className="conta-botao principal"
+                        onClick={salvarNome}
+                        disabled={ocupadoConta}
+                      >
+                        {ocupadoConta ? "salvando…" : "salvar nome"}
+                      </button>
+                      <button
+                        className="conta-botao"
+                        onClick={() => setEditandoNome(false)}
+                        disabled={ocupadoConta}
+                      >
+                        cancelar
+                      </button>
+                    </div>
+                    <p className="conta-dica">
+                      É assim que você aparece para os amigos nas listas compartilhadas.
+                    </p>
+                  </div>
+                ) : trocandoSenha ? (
+                  <div className="perfil-bloco">
+                    <label className="conta-campo">
+                      <span>senha atual</span>
+                      <input
+                        type="password"
+                        autoComplete="current-password"
+                        value={senhaAtual}
+                        onChange={(e) => setSenhaAtual(e.target.value)}
+                      />
+                    </label>
+                    <label className="conta-campo">
+                      <span>nova senha</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={senhaNova}
+                        onChange={(e) => setSenhaNova(e.target.value)}
+                        placeholder="pelo menos 6 caracteres"
+                      />
+                    </label>
+                    <label className="conta-campo">
+                      <span>repita a nova senha</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={senhaConfere}
+                        onChange={(e) => setSenhaConfere(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !ocupadoConta) salvarSenha();
+                        }}
+                      />
+                    </label>
+                    <div className="perfil-acoes">
+                      <button
+                        className="conta-botao principal"
+                        onClick={salvarSenha}
+                        disabled={ocupadoConta}
+                      >
+                        {ocupadoConta ? "salvando…" : "salvar senha"}
+                      </button>
+                      <button
+                        className="conta-botao"
+                        onClick={() => setTrocandoSenha(false)}
+                        disabled={ocupadoConta}
+                      >
+                        cancelar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="perfil-opcoes">
+                      <button className="perfil-item" onClick={abrirEdicaoNome}>
+                        <span className="perfil-item-txt">
+                          <strong>alterar nome</strong>
+                          <em>como você aparece para os amigos</em>
+                        </span>
+                        <span className="perfil-seta" aria-hidden="true">›</span>
+                      </button>
+
+                      {temSenha(usuario) ? (
+                        <button className="perfil-item" onClick={abrirTrocaSenha}>
+                          <span className="perfil-item-txt">
+                            <strong>alterar senha</strong>
+                            <em>pede a senha atual por segurança</em>
+                          </span>
+                          <span className="perfil-seta" aria-hidden="true">›</span>
+                        </button>
+                      ) : (
+                        <div className="perfil-item sem-acao">
+                          <span className="perfil-item-txt">
+                            <strong>senha</strong>
+                            <em>você entra pelo Google, então não há senha aqui</em>
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <p className="conta-texto">
+                      Suas listas e avaliações estão salvas na sua conta — é só
+                      entrar em outro aparelho para encontrá-las lá.
+                    </p>
+                    <button className="conta-botao" onClick={sairELimpar}>
+                      sair da conta
+                    </button>
+                  </>
+                )}
               </>
             ) : etapaConta === "codigo" ? (
               <>
@@ -4036,6 +4253,63 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 /* Sobre fundo claro (papel), as estrelas vazias precisam de traço mais escuro. */
 .papel .estrela svg { stroke: rgba(23,20,15,0.35); }
 .papel .estrela.cheia svg { fill: #e0a740; stroke: #e0a740; }
+
+/* ==================== PERFIL / CONFIGURAÇÕES ================= */
+.perfil-topo {
+  display: flex; align-items: center; gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed rgba(255,255,255,0.16);
+}
+.perfil-inicial {
+  width: 48px; height: 48px; border-radius: 50%; flex: none;
+  display: grid; place-items: center;
+  font-family: 'Archivo Black', sans-serif; font-size: 21px;
+  background: var(--ambar); color: #1a1305;
+}
+.perfil-id { min-width: 0; }
+.perfil-nome {
+  margin: 0; font-weight: 700; font-size: 18px; color: var(--branco);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.perfil-email {
+  margin: 2px 0 0;
+  font-family: 'Space Mono', monospace; font-size: 11px;
+  color: rgba(246,243,236,0.45);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.perfil-opcoes { display: grid; gap: 8px; }
+.perfil-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; width: 100%; text-align: left; cursor: pointer;
+  padding: 13px 14px; border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.perfil-item:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.22); }
+.perfil-item.sem-acao { cursor: default; opacity: 0.75; }
+.perfil-item.sem-acao:hover { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); }
+.perfil-item-txt { display: grid; gap: 3px; min-width: 0; }
+.perfil-item-txt strong {
+  font-family: 'Space Mono', monospace; font-weight: 700;
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--branco);
+}
+.perfil-item-txt em {
+  font-style: normal; font-size: 12px; line-height: 1.4;
+  color: rgba(246,243,236,0.5);
+}
+.perfil-seta { color: rgba(246,243,236,0.4); font-size: 20px; flex: none; }
+.perfil-bloco { display: grid; gap: 12px; }
+.perfil-acoes { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.perfil-acoes .conta-botao { margin-top: 0; }
+.conta-ok {
+  margin: 0; font-size: 13px; line-height: 1.5;
+  padding: 10px 12px; border-radius: 12px;
+  color: #cdf3d4;
+  background: rgba(74,182,110,0.16);
+  border: 1px solid rgba(74,182,110,0.4);
+}
 
 /* Botão de entrar por provedor externo (Google). Fundo claro porque é o
    padrão que as pessoas reconhecem nesses botões. */
