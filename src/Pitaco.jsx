@@ -7,6 +7,8 @@ import {
   criarConta,
   sair as sairDaConta,
   recuperarSenha,
+  verificarCodigo,
+  reenviarCodigo,
   carregarListasDaNuvem,
   salvarListasNaNuvem,
   carregarAvaliacoesDaNuvem,
@@ -913,6 +915,12 @@ export default function Pitaco() {
   const [ocupadoConta, setOcupadoConta] = useState(false);
   // Explica POR QUE a conta está sendo pedida (ex.: ao tentar salvar um filme).
   const [motivoConta, setMotivoConta] = useState("");
+  // Etapa do cadastro: "form" (e-mail e senha) ou "codigo" (confirmar por
+  // e-mail com o código de 6 números).
+  const [etapaConta, setEtapaConta] = useState("form");
+  const [codigoConta, setCodigoConta] = useState("");
+  const [emailPendente, setEmailPendente] = useState("");
+  const [segundosReenvio, setSegundosReenvio] = useState(0);
   const [sincronizando, setSincronizando] = useState(false);
   // Guarda o motivo quando a nuvem falha, para avisarmos na tela em vez de
   // deixar a pessoa achando que a sincronização "simplesmente não funciona".
@@ -1309,6 +1317,14 @@ export default function Pitaco() {
     };
   }, []);
 
+  // Contagem regressiva para poder pedir outro código (o servidor limita o
+  // reenvio, então evitamos que a pessoa tente e receba erro).
+  useEffect(() => {
+    if (segundosReenvio <= 0) return;
+    const t = setTimeout(() => setSegundosReenvio((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [segundosReenvio]);
+
   // Tendências para acender a parede
   useEffect(() => {
     let ativo = true;
@@ -1521,6 +1537,7 @@ export default function Pitaco() {
     if (listasLiberadas) return false;
     setMotivoConta(motivo || "Crie uma conta para guardar seus filmes.");
     setModoConta("criar");
+    setEtapaConta("form");
     setErroConta("");
     setAvisoConta("");
     setContaAberta(true);
@@ -1529,6 +1546,7 @@ export default function Pitaco() {
 
   function abrirConta(modo) {
     setModoConta(modo || "entrar");
+    setEtapaConta("form");
     setMotivoConta("");
     setErroConta("");
     setAvisoConta("");
@@ -1564,12 +1582,13 @@ export default function Pitaco() {
       if (modoConta === "criar") {
         const { precisaConfirmarEmail } = await criarConta(email, senha);
         if (precisaConfirmarEmail) {
-          setAvisoConta(
-            "Conta criada! Enviamos um link de confirmação para " +
-              email +
-              ". Confirme e depois entre por aqui."
-          );
-          setModoConta("entrar");
+          // Vai para a etapa do código em vez de mandar a pessoa procurar um
+          // link no e-mail — ela digita os 6 números aqui mesmo.
+          setEmailPendente(email);
+          setCodigoConta("");
+          setEtapaConta("codigo");
+          setSegundosReenvio(60);
+          setAvisoConta("");
         } else {
           setContaAberta(false);
         }
@@ -1585,8 +1604,56 @@ export default function Pitaco() {
     }
   }
 
-  async function pedirNovaSenha() {
-    const email = emailConta.trim();
+  // Confere o código de 6 números que chegou por e-mail.
+  async function confirmarCodigo() {
+    const limpo = (codigoConta || "").replace(/\D/g, "");
+    setErroConta("");
+    setAvisoConta("");
+    if (limpo.length < 6) {
+      setErroConta("Digite os 6 números que chegaram no seu e-mail.");
+      return;
+    }
+    setOcupadoConta(true);
+    try {
+      await verificarCodigo(emailPendente, limpo);
+      // Deu certo: a sessão já vem pronta, então é só fechar.
+      setContaAberta(false);
+      setEtapaConta("form");
+      setCodigoConta("");
+      setSenhaConta("");
+      setEmailPendente("");
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  async function pedirOutroCodigo() {
+    if (segundosReenvio > 0) return;
+    setErroConta("");
+    setAvisoConta("");
+    setOcupadoConta(true);
+    try {
+      await reenviarCodigo(emailPendente);
+      setAvisoConta("Enviamos um código novo para " + emailPendente + ".");
+      setSegundosReenvio(60);
+    } catch (e) {
+      setErroConta(String(e.message || e));
+    } finally {
+      setOcupadoConta(false);
+    }
+  }
+
+  // Volta do código para o formulário (ex.: errou o e-mail e quer corrigir).
+  function voltarDoCodigo() {
+    setEtapaConta("form");
+    setCodigoConta("");
+    setErroConta("");
+    setAvisoConta("");
+  }
+
+  async function pedirNovaSenha() {    const email = emailConta.trim();
     setErroConta("");
     setAvisoConta("");
     if (!email) {
@@ -2724,6 +2791,61 @@ Regras:
                 <button className="conta-botao" onClick={sairELimpar}>
                   sair da conta
                 </button>
+              </>
+            ) : etapaConta === "codigo" ? (
+              <>
+                <p className="conta-etiqueta">confirme seu e-mail</p>
+                <p className="conta-texto">
+                  Mandamos um código de 6 números para <strong>{emailPendente}</strong>.
+                  Digite ele aqui para terminar seu cadastro.
+                </p>
+
+                <label className="conta-campo">
+                  <span>código</span>
+                  <input
+                    className="campo-codigo"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={codigoConta}
+                    onChange={(e) => setCodigoConta(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !ocupadoConta) confirmarCodigo();
+                    }}
+                    placeholder="000000"
+                    maxLength={6}
+                    autoFocus
+                  />
+                </label>
+
+                {erroConta && <p className="conta-erro">{erroConta}</p>}
+                {avisoConta && <p className="conta-aviso">{avisoConta}</p>}
+
+                <button
+                  className="conta-botao principal"
+                  onClick={confirmarCodigo}
+                  disabled={ocupadoConta || codigoConta.length < 6}
+                >
+                  {ocupadoConta ? "conferindo…" : "confirmar e entrar"}
+                </button>
+
+                <button
+                  className="conta-link"
+                  onClick={pedirOutroCodigo}
+                  disabled={ocupadoConta || segundosReenvio > 0}
+                >
+                  {segundosReenvio > 0
+                    ? "pedir outro código em " + segundosReenvio + "s"
+                    : "não chegou? pedir outro código"}
+                </button>
+
+                <button className="conta-link" onClick={voltarDoCodigo} disabled={ocupadoConta}>
+                  usar outro e-mail
+                </button>
+
+                <p className="conta-dica">
+                  O e-mail pode demorar um minuto e às vezes cai no spam.
+                </p>
               </>
             ) : (
               <>
@@ -3880,6 +4002,22 @@ html, body { margin: 0; padding: 0; background: #0d0b09; }
 /* Sobre fundo claro (papel), as estrelas vazias precisam de traço mais escuro. */
 .papel .estrela svg { stroke: rgba(23,20,15,0.35); }
 .papel .estrela.cheia svg { fill: #e0a740; stroke: #e0a740; }
+
+/* Campo do código de confirmação: números grandes e espaçados, fáceis de
+   conferir com o e-mail aberto do lado. */
+.campo-codigo {
+  font-family: 'Space Mono', monospace !important;
+  font-size: 30px !important;
+  letter-spacing: 0.4em;
+  text-align: center;
+  padding: 14px 10px !important;
+}
+.campo-codigo::placeholder { letter-spacing: 0.4em; color: rgba(246,243,236,0.2); }
+.conta-dica {
+  margin: 2px 0 0; text-align: center;
+  font-size: 11.5px; line-height: 1.5;
+  color: rgba(246,243,236,0.42);
+}
 
 /* Mensagem que explica por que a conta está sendo pedida naquele momento. */
 .conta-motivo {

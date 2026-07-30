@@ -119,6 +119,32 @@ export async function sair() {
   try { await supabase.auth.signOut(); } catch (e) {}
 }
 
+// Confere o código de 6 dígitos que chegou por e-mail ao criar a conta.
+// Dando certo, a pessoa já entra (o Supabase devolve a sessão).
+export async function verificarCodigo(email, codigo) {
+  if (!supabase) throw new Error("Conta indisponível: configure o Supabase.");
+  const limpo = (codigo || "").replace(/\D/g, "");
+  if (limpo.length < 6) throw new Error("O código tem 6 números.");
+
+  const { data, error } = await supabase.auth.verifyOtp({
+    email: (email || "").trim(),
+    token: limpo,
+    type: "signup",
+  });
+  if (error) throw new Error(traduzErro(error.message));
+  return data.session || null;
+}
+
+// Reenvia o código de confirmação para o mesmo e-mail.
+export async function reenviarCodigo(email) {
+  if (!supabase) throw new Error("Conta indisponível: configure o Supabase.");
+  const { error } = await supabase.auth.resend({
+    type: "signup",
+    email: (email || "").trim(),
+  });
+  if (error) throw new Error(traduzErro(error.message));
+}
+
 export async function recuperarSenha(email) {
   if (!supabase) throw new Error("Conta indisponível: configure o Supabase.");
   const { error } = await supabase.auth.resetPasswordForEmail((email || "").trim());
@@ -482,6 +508,13 @@ export function ouvirCompartilhada(listaId, aoMudarLista, aoMudarMembros) {
 // a pessoa entenda. Mensagens desconhecidas passam como vieram.
 function traduzErro(msg) {
   const m = (msg || "").toLowerCase();
+  if (m.includes("token has expired") || m.includes("otp_expired")) {
+    return "Esse código expirou. Peça um novo abaixo.";
+  }
+  if (m.includes("token not found") || (m.includes("invalid") && m.includes("token")) ||
+      (m.includes("invalid") && m.includes("otp"))) {
+    return "Código incorreto. Confira os números e tente de novo.";
+  }
   if (m.includes("permissão para editar") || m.includes("permissao para editar")) {
     return "Nesta lista só quem criou pode adicionar ou remover títulos.";
   }
