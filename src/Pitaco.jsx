@@ -303,6 +303,13 @@ async function buscarAcervoJogo() {
     const paginas = await Promise.all(
       rotas.map((u) => fetch(u).then((r) => r.json()).catch(() => ({ results: [] })))
     );
+    // Se o servidor recusou alguma rota, dizemos qual no console — foi assim
+    // que descobrimos que faltava liberar movie/popular na lista branca de
+    // api/tmdb.js. Sem isso o acervo volta vazio e o motivo fica invisível.
+    const recusa = paginas.find((d) => d && d.error);
+    if (recusa) {
+      console.error("[Pitaco] O servidor recusou uma rota do TMDB:", recusa.error);
+    }
     const juntos = paginas.flatMap((d) => d.results || []);
     const vistos = new Set();
     const acervo = [];

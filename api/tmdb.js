@@ -9,9 +9,21 @@
 //
 // Só liberamos rotas conhecidas (lista branca) por segurança, e cacheamos a
 // resposta na borda por algumas horas para economizar chamadas.
+//
+// Ao usar uma rota nova no front, ela PRECISA ser adicionada aqui — senão o
+// servidor recusa com "Rota não permitida" e o front recebe uma resposta sem
+// resultados.
 // -----------------------------------------------------------------------------
 
-const ROTAS_PERMITIDAS = new Set(["search/multi", "trending/all/week"]);
+const ROTAS_PERMITIDAS = new Set([
+  "search/multi",
+  "trending/all/week",
+  // Usadas pelo jogo "adivinhe a cena" para montar o acervo de cenas.
+  "movie/popular",
+  "tv/popular",
+  "movie/top_rated",
+  "tv/top_rated",
+]);
 
 export default async function handler(req, res) {
   const chave = process.env.TMDB_API_KEY;
